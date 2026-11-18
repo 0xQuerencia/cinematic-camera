@@ -54,6 +54,8 @@ import kotlin.math.log10
 
 private val Context.preferences by preferencesDataStore("instrument")
 private val proKey = booleanPreferencesKey("pro")
+private val audioKey = booleanPreferencesKey("audio")
+private val liteKey = booleanPreferencesKey("lite_preview")
 private val favoriteKey = stringSetPreferencesKey("favorites")
 private val leftKey = booleanPreferencesKey("left_handed")
 internal enum class Drawer(val label: String) {
@@ -71,9 +73,18 @@ fun CameraApp(engine: CameraEngine) {
     val pro = prefs?.get(proKey) ?: true
     val left = prefs?.get(leftKey) ?: false
     val scope = rememberCoroutineScope()
+    val audioEnabled = prefs?.get(audioKey) ?: true
+    val liteEnabled = prefs?.get(liteKey) ?: false
+    LaunchedEffect(audioEnabled) { engine.setAudio(audioEnabled) }
+    LaunchedEffect(liteEnabled) { engine.setLite(liteEnabled) }
+    fun setAudio(enabled: Boolean) {
+        engine.setAudio(enabled)
+        scope.launch { context.preferences.edit { it[audioKey] = enabled } }
+    }
     val storage = remember { LookStorage(context) }
     var hasCamera by remember { mutableStateOf(context.granted(Manifest.permission.CAMERA)) }
     var drawer by rememberSaveable { mutableStateOf<Drawer?>(null) }
+    LaunchedEffect(drawer) { engine.pausePreview(drawer == Drawer.MEDIA) }
     var guide by rememberSaveable { mutableStateOf("Off") }
     var instrument by rememberSaveable { mutableStateOf(ScopeMode.OFF) }
     var lab by rememberSaveable { mutableStateOf(false) }
@@ -204,7 +215,7 @@ fun CameraApp(engine: CameraEngine) {
             if (wantedStabilization && !state.controls.eis) skipped.add("stabilization")
             engine.configure(format ?: state.format, supportedFps, bitrate ?: state.bitrate,
                 pipeline ?: state.pipeline, wantedStabilization && state.controls.eis)
-            engine.setAudio(configuration.optBoolean("audio", true))
+            setAudio(configuration.optBoolean("audio", true))
             guide = configuration.optString("guide", guide).takeIf { it in guides } ?: guide
             if (grade != item.grade) {
                 history = history.takeLast(39) + grade
@@ -334,6 +345,18 @@ fun CameraApp(engine: CameraEngine) {
     }
 
     val deviceReport = { diagnostics(state) }
+    fun quickPreset(choice: StoryPreset) {
+        val format = state.formats.firstOrNull { it.label == "1080p" }
+            ?: state.formats.firstOrNull { it.label == "720p" } ?: state.format
+        val rate = choice.fps?.takeIf { it in format?.rates.orEmpty() }
+        val look = originalLooks.first { it.name == choice.look }
+        engine.configure(format = format, fps = rate, pipeline = if (look.cube == null) Pipeline.DIRECT else Pipeline.CLEAN)
+        grade = Grade(look = look)
+        currentSaved = null
+        guide = choice.guide
+        drawer = null
+        if (choice.fps != null && rate == null) engine.tell("${choice.name} requested ${choice.fps} fps. This lens and resolution use Auto.")
+    }
     drawer?.let { panel ->
         ModalBottomSheet(onDismissRequest = { drawer = null }, containerColor = Raised,
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
@@ -351,7 +374,7 @@ fun CameraApp(engine: CameraEngine) {
                     Drawer.FOCUS -> FocusPanel(state, engine)
                     Drawer.WB -> WhiteBalancePanel(state, engine) { drawer = null; lab = true }
                     Drawer.LENS -> LensPanel(state, engine)
-                    Drawer.AUDIO -> AudioPanel(state, engine)
+                    Drawer.AUDIO -> AudioPanel(state, ::setAudio)
                     Drawer.TOOLS -> {
                         listOf(Drawer.EXPOSURE, Drawer.FOCUS, Drawer.WB, Drawer.LENS, Drawer.AUDIO, Drawer.OUTPUT, Drawer.MONITOR)
                             .forEach { target -> Key(target.label, Modifier.fillMaxWidth()) { drawer = target } }
@@ -363,7 +386,10 @@ fun CameraApp(engine: CameraEngine) {
                         ToggleRow("Left-handed landscape", left, !state.active) {
                             scope.launch { context.preferences.edit { prefs -> prefs[leftKey] = it } }
                         }
-                        ToggleRow("Lite preview", state.lite, !state.active, engine::setLite)
+                        ToggleRow("Lite preview", state.lite, !state.active) { enabled ->
+                            engine.setLite(enabled)
+                            scope.launch { context.preferences.edit { it[liteKey] = enabled } }
+                        }
                         Hint("Lite skips preview bloom and halation. Baked capture uses the full selected grade.")
                         Key("Export device report") { exportFile("cinematic-device.json", deviceReport().toString(2)) }
                         Text(deviceReport().toString(2), style = Timecode, color = Secondary)
@@ -374,7 +400,7 @@ fun CameraApp(engine: CameraEngine) {
                             val existing = settings[favoriteKey].orEmpty()
                             settings[favoriteKey] = if (name in existing) existing - name else existing + name
                         } } },
-                        import = { import.launch(arrayOf("*/*")) },
+                        import = { import.launch(arrayOf("*/*")) }, quick = ::quickPreset,
                         save = { preset -> saveName = if (preset) "" else currentSaved?.name.orEmpty(); saveAs = preset },
                         export = { item -> exportFile("${item.name}.json", storage.encode(item)) })
                     Drawer.MEDIA -> MediaPanel(engine, state.clipRevision, ::exportFile)

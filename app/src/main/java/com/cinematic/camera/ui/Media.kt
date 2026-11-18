@@ -13,6 +13,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.cinematic.camera.capture.CameraEngine
 import com.cinematic.camera.media.Clip
+import com.cinematic.camera.media.GradedExport
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -26,15 +29,18 @@ internal fun MediaPanel(engine: CameraEngine, revision: Int, export: (String, St
     var delete by remember { mutableStateOf<Clip?>(null) }
     var playing by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var progress by remember { mutableStateOf<Int?>(null) }
+    var exporting by remember { mutableStateOf<Job?>(null) }
     LaunchedEffect(revision) { clips = withContext(Dispatchers.IO) { engine.clips.list() } }
     error?.let { Hint(it, Amber) }
     if (clips.isEmpty()) Hint("Record a take to add it to the library.")
     selected?.let { clip ->
-        Key("All clips") { selected = null; playing = false }
+        Key("All clips", enabled = exporting == null) { selected = null; playing = false }
         Text(clip.title, style = MaterialTheme.typography.titleMedium)
         val capture = clip.details.optJSONObject("capture")
         Hint(when (capture?.optString("pipeline")) {
             "BAKED" -> "Baked pipeline"
+            "EXPORT" -> "Baked look · offline export"
             "CLEAN" -> "Clean file · look manifest"
             else -> "Direct capture · clean file"
         }, Info)
@@ -60,15 +66,58 @@ internal fun MediaPanel(engine: CameraEngine, revision: Int, export: (String, St
                 }
                 context.startActivity(Intent.createChooser(intent, "Share video"))
             }
-            Key("Look manifest") { export("${clip.title}.json", clip.manifest.toString(2)) }
-            capture?.optString("cube")?.takeIf { it.isNotEmpty() }?.let { cube ->
-                Key("Export cube") { export("${clip.title}.cube", cube) }
+            Key("Look manifest") {
+                scope.launch {
+                    runCatching { withContext(Dispatchers.IO) { engine.clips.manifest(clip).toString(2) } }
+                        .onSuccess { export("${clip.title}.json", it) }
+                        .onFailure { error = "Could not read the look manifest." }
+                }
             }
-            Key("Delete") { delete = clip }
+            if (capture?.let { it.has("cubeRef") || it.has("cube") } == true) {
+                Key("Export cube") {
+                    scope.launch {
+                        runCatching { withContext(Dispatchers.IO) { checkNotNull(engine.clips.cubeText(clip)) } }
+                            .onSuccess { export("${clip.title}.cube", it) }
+                            .onFailure { error = "Could not read the saved cube." }
+                    }
+                }
+            }
+            if (capture?.optString("pipeline") == "CLEAN" && clip.details.optBoolean("verifiedTracks")) {
+                Key("Render graded copy", enabled = exporting == null) {
+                    playing = false
+                    error = null
+                    progress = null
+                    exporting = scope.launch {
+                        try {
+                            val rendered = GradedExport(context, engine.clips).render(clip) { progress = it }
+                            clips = listOf(rendered) + clips
+                            selected = rendered
+                        } catch (cancel: CancellationException) {
+                            throw cancel
+                        } catch (failure: Exception) {
+                            android.util.Log.e("CinematicCamera", "Graded export failed", failure)
+                            error = "Graded export failed. ${failure.localizedMessage.orEmpty()}"
+                        } finally {
+                            exporting = null
+                        }
+                    }
+                }
+            }
+            Key("Delete", enabled = exporting == null) { delete = clip }
+        }
+        if (exporting != null) {
+            val amount = progress
+            Hint(if (amount == 100) "Publishing graded MP4…" else "Rendering graded MP4${amount?.let { " · $it%" }.orEmpty()}")
+            if (amount == null) LinearProgressIndicator(Modifier.fillMaxWidth())
+            else LinearProgressIndicator(progress = { amount / 100f }, modifier = Modifier.fillMaxWidth())
+            Key("Cancel export", enabled = amount != 100) { exporting?.cancel() }
         }
         capture?.let { data ->
             Hint("Target ${data.optString("requestedResolution")} · ${data.optString("requestedFps")} · ${data.optInt("targetBitrateMbps")} Mb/s")
             Hint("Video samples ${clip.details.optInt("videoSamples")} · ${data.optLong("recordedBytes") / 1024} KiB")
+            data.optJSONArray("formatDifferences")?.takeIf { it.length() > 0 }?.let { differences ->
+                Hint("Measured output differs in ${(0 until differences.length()).joinToString { differences.getString(it) }}.", Amber)
+            }
             if (data.optInt("recorderError") != 0) Hint("Recovered recording · status ${data.optInt("recorderError")}", Amber)
         }
     } ?: clips.forEach { clip ->

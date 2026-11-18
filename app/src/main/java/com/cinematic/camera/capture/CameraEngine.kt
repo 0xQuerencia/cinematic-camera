@@ -58,6 +58,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 import kotlin.math.roundToInt
@@ -130,6 +131,8 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
     private var processor: ColorProcessor? = null
     private var binding = 0
     private var disposed = false
+    private var previewPaused = false
+    private var lensRevision = 0
     private var lastRequest = 0
     private var grade = Grade()
     private var compare = false
@@ -187,10 +190,26 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         if (state.value.active || (!initial && lens == state.value.lens)) return
         val info = provider?.availableCameraInfos?.firstOrNull { Camera2CameraInfo.from(it).cameraId == lens.id }
             ?: return
-        val formats = formats(info)
-        val format = formats.firstOrNull { it.quality == state.value.format?.quality } ?: formats.firstOrNull()
-        val fps = state.value.fps?.takeIf { it in format?.rates.orEmpty() }
+        val revision = ++lensRevision
+        stateFlow.update { it.copy(ready = false) }
+        scope.launch {
+            runCatching { withContext(Dispatchers.IO) { formats(info) to if (initial) clips.lastVerifiedFormat(lens.id) else null } }
+                .onSuccess { (formats, verified) ->
+                    if (!disposed && revision == lensRevision) installLens(lens, info, formats, verified, initial)
+                }.onFailure {
+                    if (!disposed && revision == lensRevision) problem("Could not query this camera's video profiles", it)
+                }
+        }
+    }
+
+    private fun installLens(lens: Lens, info: CameraInfo, formats: List<Format>,
+                            verified: JSONObject?, initial: Boolean) {
+        val format = verified?.optString("requestedResolution")?.let { label -> formats.firstOrNull { it.label == label } }
+            ?: formats.firstOrNull { it.quality == state.value.format?.quality } ?: formats.firstOrNull()
+        val previousRate = verified?.optInt("requestedFps")?.takeIf { it > 0 } ?: state.value.fps
+        val fps = previousRate?.takeIf { it in format?.rates.orEmpty() }
             ?: format?.rates?.firstOrNull { it == 30 }
+        val bitrate = verified?.optInt("targetBitrateMbps")?.takeIf { it in 4..32 } ?: state.value.bitrate
         val old = state.value
         val changes = buildList {
             if (!initial && format?.quality != old.format?.quality) add("resolution")
@@ -198,7 +217,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
             if (!initial && old.stabilization) add("stabilization")
         }
         stateFlow.update {
-            it.copy(lens = lens, formats = formats, format = format, fps = fps, ready = false,
+            it.copy(lens = lens, formats = formats, format = format, fps = fps, bitrate = bitrate, ready = false,
                 controls = capabilities(info), manual = Manual(), sensor = Sensor(), stabilization = false,
                 ev = 0, zoom = 1f, message = if (changes.isEmpty()) null else "Lens switch changed ${changes.joinToString()} for the next take.")
         }
@@ -257,12 +276,30 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         video?.targetRotation = rotation
     }
 
+    fun pausePreview(paused: Boolean) {
+        if (previewPaused == paused || disposed || state.value.active) return
+        previewPaused = paused
+        if (paused) {
+            binding++
+            camera?.cameraInfo?.cameraState?.removeObservers(owner)
+            provider?.unbindAll()
+            processor?.close()
+            processor = null
+            camera = null
+            video = null
+            preview = null
+            stateFlow.update { it.copy(ready = false) }
+        } else bind()
+    }
+
     private fun bind() {
+        if (previewPaused) return
         val provider = provider ?: return
         val view = view ?: return
         val lens = state.value.lens ?: return
         val generation = ++binding
         scopeFrames.value = null
+        camera?.cameraInfo?.cameraState?.removeObservers(owner)
         provider.unbindAll()
         processor?.close()
         processor = null
@@ -330,11 +367,18 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
             camera = bound
             preview = surface
             video = capture
+            var restored = false
             bound.cameraInfo.cameraState.observe(owner) { result ->
                 if (binding == generation) {
                     result.error?.let { problem("Camera session error ${it.code}", it.cause) }
-                    stateFlow.update { it.copy(ready = result.type == androidx.camera.core.CameraState.Type.OPEN &&
-                        !it.gpuFailed && result.error == null && capture != null) }
+                    val open = result.type == androidx.camera.core.CameraState.Type.OPEN && result.error == null
+                    if (open && !restored) {
+                        restored = true
+                        if (configuration.manual != Manual()) manual(configuration.manual)
+                        if (configuration.zoom != 1f) zoom(configuration.zoom)
+                        if (configuration.ev != 0) ev(configuration.ev)
+                    }
+                    stateFlow.update { it.copy(ready = open && !it.gpuFailed && capture != null) }
                 }
             }
         } catch (error: Exception) {
@@ -421,11 +465,24 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
                                     val measured = runCatching { clips.inspect(uri) }.onFailure {
                                         Log.w("CinematicCamera", "Could not inspect $uri", it)
                                     }.getOrNull()
+                                    val differences = if (measured == null) emptyList() else buildList {
+                                        if (measured.optString("videoMime") != "video/avc") add("codec")
+                                        current.format?.let { format ->
+                                            val width = measured.optInt("width")
+                                            val height = measured.optInt("height")
+                                            if (maxOf(width, height) != maxOf(format.width, format.height) ||
+                                                minOf(width, height) != minOf(format.width, format.height)) add("resolution")
+                                        }
+                                        val fps = measured.optDouble("averageFps")
+                                        if (current.fps != null && (!fps.isFinite() || kotlin.math.abs(fps - current.fps) > 1.0)) add("frame rate")
+                                        if (current.audio && !measured.optBoolean("audioTrack")) add("audio")
+                                    }
+                                    metadata.put("formatDifferences", JSONArray(differences))
                                     clips.save(uri, title, metadata, measured)
                                     when {
                                         measured == null -> "File retained. MP4 tracks could not be verified."
                                         event.hasError() -> "Recovered video after recorder status ${event.error}."
-                                        current.audio && !measured.optBoolean("audioTrack") -> "Video saved without a microphone track."
+                                        differences.isNotEmpty() -> "Video saved. Measured output differs in ${differences.joinToString()}."
                                         state.value.audioIssue -> "Video saved. The microphone reported an error."
                                         else -> "Clip saved and MP4 tracks verified."
                                     }
@@ -555,6 +612,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         disposed = true
         stop()
         monitor.cancel()
+        camera?.cameraInfo?.cameraState?.removeObservers(owner)
         provider?.unbindAll()
         processor?.close()
         view = null

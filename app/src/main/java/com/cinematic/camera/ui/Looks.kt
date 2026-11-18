@@ -106,10 +106,23 @@ internal fun LookSwatch(look: Look, modifier: Modifier = Modifier) {
     }
 }
 
+internal data class StoryPreset(val name: String, val look: String, val fps: Int?, val guide: String)
+
+private val stories = listOf(
+    StoryPreset("Everyday", "Neutral", 30, "Off"),
+    StoryPreset("Cinematic", "Film Print", 24, "2.39:1"),
+    StoryPreset("Night", "Moonlit", 30, "Thirds"),
+    StoryPreset("Portrait", "Soft Portrait", 30, "Thirds"),
+    StoryPreset("Documentary", "Documentary", 30, "16:9"),
+    StoryPreset("Action", "Clean Commercial", 60, "16:9"),
+    StoryPreset("Social Vertical", "Pastel", 30, "9:16"),
+)
+
 @Composable
 internal fun LooksPanel(original: List<Look>, saved: List<SavedLook>, favorites: Set<String>, importing: Boolean,
                        choose: (Look) -> Unit, apply: (SavedLook) -> Unit, favorite: (String) -> Unit,
-                       import: () -> Unit, save: (Boolean) -> Unit, export: (SavedLook) -> Unit) {
+                       import: () -> Unit, save: (Boolean) -> Unit, export: (SavedLook) -> Unit,
+                       quick: (StoryPreset) -> Unit) {
     var search by rememberSaveable { mutableStateOf("") }
     var category by rememberSaveable { mutableStateOf("Looks") }
     var family by rememberSaveable { mutableStateOf("All") }
@@ -141,6 +154,14 @@ internal fun LooksPanel(original: List<Look>, saved: List<SavedLook>, favorites:
             }
             Hint(look.family)
         }
+    }
+    if (category == "Capture presets") {
+        Section("Quick presets")
+        stories.filter { it.name.contains(search, true) }.forEach { story ->
+            Key(story.name, Modifier.fillMaxWidth()) { quick(story) }
+            Hint("${story.look} · ${story.fps} fps target · ${story.guide} guide")
+        }
+        Section("Saved presets")
     }
     if (category != "Looks") {
         saved.filter { it.name.contains(search, true) && when (category) {

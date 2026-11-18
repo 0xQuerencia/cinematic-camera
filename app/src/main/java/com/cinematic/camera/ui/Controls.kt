@@ -16,6 +16,8 @@ import androidx.compose.ui.unit.dp
 import com.cinematic.camera.capture.CameraEngine
 import com.cinematic.camera.capture.CaptureState
 import com.cinematic.camera.capture.Pipeline
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlin.math.roundToInt
@@ -206,8 +208,35 @@ internal fun FocusPanel(state: CaptureState, engine: CameraEngine) {
             Key("Auto", selected = focus == null) { engine.manual(state.manual.copy(focus = null)) }
             Key("Manual", selected = focus != null) { engine.manual(state.manual.copy(focus = state.sensor.focus ?: 0f)) }
         }
-        if (focus != null) Precision("Focus distance", focus, 0f..state.controls.focus, unit = " D") {
-            engine.manual(state.manual.copy(focus = it))
+        if (focus != null) {
+            Precision("Focus distance", focus, 0f..state.controls.focus, unit = " D") {
+                engine.manual(state.manual.copy(focus = it))
+            }
+            var a by remember(state.lens?.id) { mutableStateOf<Float?>(null) }
+            var b by remember(state.lens?.id) { mutableStateOf<Float?>(null) }
+            var pulling by remember { mutableStateOf(false) }
+            val scope = rememberCoroutineScope()
+            KeysRow {
+                Key("Mark A", enabled = !pulling && state.sensor.focus != null) { a = state.sensor.focus }
+                Key("Mark B", enabled = !pulling && state.sensor.focus != null) { b = state.sensor.focus }
+                Key("Go to A", enabled = !pulling && a != null) { a?.let { engine.manual(state.manual.copy(focus = it)) } }
+                Key("Pull to B", enabled = !pulling && b != null && state.sensor.focus != null) {
+                    val target = b ?: return@Key
+                    val start = state.sensor.focus ?: return@Key
+                    scope.launch {
+                        pulling = true
+                        try {
+                            for (step in 1..12) {
+                                engine.manual(state.manual.copy(focus = start + (target - start) * step / 12))
+                                delay(125)
+                            }
+                        } finally {
+                            pulling = false
+                        }
+                    }
+                }
+            }
+            Hint("A ${a?.let { "%.2f D".format(it) } ?: "—"} · B ${b?.let { "%.2f D".format(it) } ?: "—"}")
         }
     }
     Hint("Tap the viewfinder for metering. Touch and hold to hold autofocus where supported.")
@@ -255,8 +284,8 @@ internal fun LensPanel(state: CaptureState, engine: CameraEngine) {
 }
 
 @Composable
-internal fun AudioPanel(state: CaptureState, engine: CameraEngine) {
-    ToggleRow("Record microphone", state.audio, !state.active, engine::setAudio)
+internal fun AudioPanel(state: CaptureState, change: (Boolean) -> Unit) {
+    ToggleRow("Record microphone", state.audio, !state.active, change)
     Hint("CameraX uses Android's default microphone route. The recorder reports peak amplitude during a take.")
     Mark("Unavailable", "Manual gain and explicit input routing are outside this recording pipeline.")
 }
