@@ -1,8 +1,8 @@
 <resources>
-    <style name="Theme.Cinematic" parent="android:style/Theme.Material.NoActionBar">
+    <style name="Theme.Cinematic" parent="Theme.Cinematic.Base" />
+    <style name="Theme.Cinematic.Base" parent="android:style/Theme.Material.NoActionBar">
         <item name="android:windowBackground">#090A0B</item>
         <item name="android:colorAccent">#F2B65A</item>
         <item name="android:windowLightStatusBar">false</item>
-        <item name="android:windowLightNavigationBar">false</item>
     </style>
 </resources>

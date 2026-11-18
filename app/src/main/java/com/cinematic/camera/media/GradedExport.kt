@@ -142,6 +142,8 @@ private class ExportShader(private val grade: Grade) : BaseGlShaderProgram(false
             check(GL.glGetError() == GL.GL_NO_ERROR) { "OpenGL could not render the export frame." }
         } catch (error: Exception) {
             throw VideoFrameProcessingException(error, presentationTimeUs)
+        } finally {
+            GL.glBindVertexArray(0)
         }
     }
 

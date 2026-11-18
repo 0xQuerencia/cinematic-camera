@@ -1,6 +1,8 @@
 package com.cinematic.camera.color
 
+import android.annotation.SuppressLint
 import android.opengl.GLES30 as GL
+import android.util.Half
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
@@ -35,21 +37,28 @@ internal class GradeShader(private val inputTarget: Int) : AutoCloseable {
         GL.glBindTexture(GL.GL_TEXTURE_3D, lut)
         parameters(GL.GL_TEXTURE_3D)
         GL.glTexParameteri(GL.GL_TEXTURE_3D, GL.GL_TEXTURE_WRAP_R, GL.GL_CLAMP_TO_EDGE)
-        GL.glTexImage3D(GL.GL_TEXTURE_3D, 0, GL.GL_RGB16F, 1, 1, 1, 0, GL.GL_RGB, GL.GL_FLOAT, null)
+        GL.glTexImage3D(GL.GL_TEXTURE_3D, 0, GL.GL_RGBA16F, 1, 1, 1, 0, GL.GL_RGBA, GL.GL_HALF_FLOAT, null)
         GL.glActiveTexture(GL.GL_TEXTURE0)
     }
 
+    @SuppressLint("HalfFloat")
     fun prepare(value: Grade, seed: Float, lite: Boolean, inputName: Int? = null) {
         val cube = value.look.cube
         GL.glActiveTexture(GL.GL_TEXTURE1)
         GL.glBindTexture(GL.GL_TEXTURE_3D, lut)
         if (uploaded !== cube) {
             if (cube != null) {
-                val buffer = ByteBuffer.allocateDirect(cube.samples.size * Float.SIZE_BYTES)
-                    .order(ByteOrder.nativeOrder()).asFloatBuffer()
-                buffer.put(cube.samples).position(0)
-                GL.glTexImage3D(GL.GL_TEXTURE_3D, 0, GL.GL_RGB16F, cube.size, cube.size, cube.size,
-                    0, GL.GL_RGB, GL.GL_FLOAT, buffer)
+                val buffer = ByteBuffer.allocateDirect(cube.samples.size / 3 * 4 * Short.SIZE_BYTES)
+                    .order(ByteOrder.nativeOrder()).asShortBuffer()
+                for (offset in cube.samples.indices step 3) {
+                    buffer.put(Half.toHalf(cube.samples[offset]))
+                    buffer.put(Half.toHalf(cube.samples[offset + 1]))
+                    buffer.put(Half.toHalf(cube.samples[offset + 2]))
+                    buffer.put(Half.toHalf(1f))
+                }
+                buffer.flip()
+                GL.glTexImage3D(GL.GL_TEXTURE_3D, 0, GL.GL_RGBA16F, cube.size, cube.size, cube.size,
+                    0, GL.GL_RGBA, GL.GL_HALF_FLOAT, buffer)
                 check(GL.glGetError() == GL.GL_NO_ERROR) { "GPU LUT upload failed." }
             }
             uploaded = cube

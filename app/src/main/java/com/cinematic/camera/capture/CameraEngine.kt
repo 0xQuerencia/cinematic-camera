@@ -21,6 +21,7 @@ import android.os.SystemClock
 import android.provider.MediaStore
 import android.util.Log
 import android.util.Range
+import android.util.Size
 import android.view.Surface
 import androidx.camera.camera2.interop.Camera2CameraControl
 import androidx.camera.camera2.interop.Camera2CameraInfo
@@ -33,6 +34,9 @@ import androidx.camera.core.DynamicRange
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.Preview
 import androidx.camera.core.UseCaseGroup
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.AudioStats
 import androidx.camera.video.MediaStoreOutputOptions
@@ -314,6 +318,19 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         try {
             val rotation = view.display?.rotation ?: Surface.ROTATION_0
             val previewBuilder = Preview.Builder().setTargetRotation(rotation)
+            configuration.format?.let { format ->
+                val aspect = if (format.width * 9 == format.height * 16)
+                    AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
+                else AspectRatioStrategy.RATIO_4_3_FALLBACK_AUTO_STRATEGY
+                val previewSize = if (aspect == AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                    Size(1280, 720) else Size(960, 720)
+                previewBuilder.setResolutionSelector(ResolutionSelector.Builder()
+                    .setAspectRatioStrategy(aspect)
+                    .setResolutionStrategy(ResolutionStrategy(previewSize,
+                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER_THEN_HIGHER))
+                    .build())
+            }
+            var restored = false
             val callback = object : CameraCaptureSession.CaptureCallback() {
                 private var last = 0L
                 override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
@@ -330,7 +347,16 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
                         result.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE)?.let { it != 0 },
                         result.get(CaptureResult.CONTROL_AWB_LOCK) == true)
                     main.execute {
-                        if (!disposed && binding == generation) stateFlow.update { it.copy(sensor = sample) }
+                        if (!disposed && binding == generation &&
+                            owner.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
+                            stateFlow.update { it.copy(sensor = sample, ready = video != null && !it.gpuFailed) }
+                            if (!restored) {
+                                restored = true
+                                if (configuration.manual != Manual()) manual(configuration.manual)
+                                if (configuration.zoom != 1f) zoom(configuration.zoom)
+                                if (configuration.ev != 0) ev(configuration.ev)
+                            }
+                        }
                     }
                 }
             }
@@ -367,18 +393,12 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
             camera = bound
             preview = surface
             video = capture
-            var restored = false
             bound.cameraInfo.cameraState.observe(owner) { result ->
                 if (binding == generation) {
                     result.error?.let { problem("Camera session error ${it.code}", it.cause) }
-                    val open = result.type == androidx.camera.core.CameraState.Type.OPEN && result.error == null
-                    if (open && !restored) {
-                        restored = true
-                        if (configuration.manual != Manual()) manual(configuration.manual)
-                        if (configuration.zoom != 1f) zoom(configuration.zoom)
-                        if (configuration.ev != 0) ev(configuration.ev)
+                    if (result.type != androidx.camera.core.CameraState.Type.OPEN || result.error != null) {
+                        stateFlow.update { it.copy(ready = false) }
                     }
-                    stateFlow.update { it.copy(ready = open && !it.gpuFailed && capture != null) }
                 }
             }
         } catch (error: Exception) {

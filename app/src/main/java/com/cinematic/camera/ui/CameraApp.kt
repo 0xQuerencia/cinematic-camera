@@ -455,11 +455,17 @@ private fun Viewfinder(engine: CameraEngine, target: PreviewView, modifier: Modi
     Box(modifier, contentAlignment = Alignment.Center) {
         if (available) {
             AndroidView(factory = {
+                var tapped: Offset? = null
+                target.setOnClickListener {
+                    val point = tapped ?: Offset(target.width / 2f, target.height / 2f)
+                    engine.focus(point.x, point.y, false)
+                }
                 val detector = android.view.GestureDetector(it, object : android.view.GestureDetector.SimpleOnGestureListener() {
                     override fun onDown(e: MotionEvent) = true
                     override fun onSingleTapUp(e: MotionEvent): Boolean {
+                        tapped = Offset(e.x, e.y)
                         target.performClick()
-                        engine.focus(e.x, e.y, false)
+                        tapped = null
                         return true
                     }
                     override fun onLongPress(e: MotionEvent) { engine.focus(e.x, e.y, true) }
@@ -543,10 +549,7 @@ private fun CompareKey(compare: Boolean, modifier: Modifier, toggle: (Boolean) -
                 action(true)
                 try { tryAwaitRelease() } finally { action(false) }
             })
-        }.then(compareSemantics(compare) { action(!compare) }), contentAlignment = Alignment.Center) {
+        }.compareAction(if (compare) "Restore look" else "Compare with original") { action(!compare) }, contentAlignment = Alignment.Center) {
         Hint(if (compare) "Before" else "A/B", if (compare) Amber else Paper)
     }
 }
-
-private fun compareSemantics(compare: Boolean, toggle: () -> Unit): Modifier =
-    Modifier.compareAction(if (compare) "Restore look" else "Compare with original", toggle)

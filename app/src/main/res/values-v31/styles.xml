@@ -1,0 +1,6 @@
+<resources>
+    <style name="Theme.Cinematic" parent="Theme.Cinematic.Base">
+        <item name="android:windowSplashScreenBackground">#090A0B</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/ic_cinematic</item>
+    </style>
+</resources>
