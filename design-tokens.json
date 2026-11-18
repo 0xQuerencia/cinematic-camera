@@ -1,0 +1,154 @@
+{
+  "$schema": "https://design-tokens.github.io/community-group/format/",
+  "name": "Cinematic Camera / Instrument",
+  "version": "1.0.0",
+  "units": {
+    "layout": "dp",
+    "type": "sp",
+    "motion": "ms"
+  },
+  "colors": {
+    "base": {
+      "black": "#090A0B",
+      "surface": "#111315",
+      "raised": "#17191B",
+      "field": "#222528",
+      "border": "#33383B"
+    },
+    "text": {
+      "primary": "#F4F3F0",
+      "secondary": "#D0D2D0",
+      "tertiary": "#969B9B",
+      "inverse": "#090A0B"
+    },
+    "accent": {
+      "primary": "#F2B65A",
+      "selected": "#2D2418",
+      "record": "#E94B43",
+      "native": "#77C99A",
+      "info": "#79B8D4",
+      "unavailable": "#A7ADAE"
+    },
+    "overlay": {
+      "topScrim": "rgba(0,0,0,0.72)",
+      "subtle": "rgba(0,0,0,0.36)",
+      "guide": "rgba(255,255,255,0.65)"
+    }
+  },
+  "type": {
+    "family": {
+      "body": "Inter, Roboto, sans-serif",
+      "mono": "IBM Plex Mono, Roboto Mono, monospace"
+    },
+    "sizeSp": {
+      "micro": 11,
+      "caption": 12,
+      "hud": 14,
+      "control": 14,
+      "body": 15,
+      "value": 16,
+      "panel": 18,
+      "screen": 22,
+      "display": 36
+    },
+    "lineHeightSp": {
+      "micro": 14,
+      "caption": 16,
+      "hud": 18,
+      "control": 20,
+      "body": 22,
+      "value": 22,
+      "panel": 24,
+      "screen": 28,
+      "display": 42
+    },
+    "weight": {
+      "regular": 400,
+      "medium": 500,
+      "semibold": 600
+    },
+    "numeric": "tabular-nums"
+  },
+  "spacingDp": {
+    "s1": 4,
+    "s2": 8,
+    "s3": 12,
+    "s4": 16,
+    "s5": 20,
+    "s6": 24,
+    "s8": 32,
+    "s10": 40,
+    "s12": 48
+  },
+  "radiusDp": {
+    "compact": 6,
+    "sheet": 10,
+    "dialog": 14,
+    "full": 999
+  },
+  "touchDp": {
+    "minimum": 48,
+    "row": 56,
+    "recordDiameter": 72,
+    "smallIcon": 20,
+    "largeIcon": 24
+  },
+  "layoutDp": {
+    "compactMaxExclusive": 600,
+    "expandedMin": 840,
+    "portraitMargin": 16,
+    "landscapeMargin": 12,
+    "sideRail": 56,
+    "topTelemetry": 56,
+    "bottomRecordRail": 92
+  },
+  "strokeDp": {
+    "divider": 1,
+    "icon": 1.8,
+    "focus": 1.5
+  },
+  "motionMs": {
+    "tap": 100,
+    "drawer": 180,
+    "mode": 150,
+    "lookCrossfade": 130,
+    "none": 0
+  },
+  "camera": {
+    "defaultAspectRatio": "16:9",
+    "modeLabels": [
+      "Simple",
+      "Pro"
+    ],
+    "capabilityStates": [
+      "Native",
+      "Assisted",
+      "Unavailable",
+      "Checking",
+      "Temporarily unavailable"
+    ],
+    "effectPerformance": [
+      "Live · Full",
+      "Live · Lite",
+      "Export only"
+    ],
+    "outputStates": [
+      "LOOK BAKED",
+      "LOOK PREVIEW / CLEAN FILE"
+    ]
+  },
+  "accessibility": {
+    "minimumTouchDp": 48,
+    "bodyMinimumContrast": 4.5,
+    "honorFontScale": true,
+    "allowReducedMotion": true,
+    "statusNeedsText": true
+  },
+  "principles": [
+    "The image is the hero",
+    "One Pro interface on every supported phone",
+    "Use actual verified metadata",
+    "Never silently downgrade a recording",
+    "Control effects cost, not user access"
+  ]
+}
