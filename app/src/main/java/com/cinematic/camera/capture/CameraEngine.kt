@@ -1,0 +1,612 @@
+@file:androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
+
+package com.cinematic.camera.capture
+
+import android.Manifest
+import android.annotation.SuppressLint
+import android.content.ContentValues
+import android.content.Context
+import android.content.pm.PackageManager
+import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraCharacteristics as Keys
+import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
+import android.media.MediaCodecList
+import android.os.Build
+import android.os.Environment
+import android.os.PowerManager
+import android.os.StatFs
+import android.os.SystemClock
+import android.provider.MediaStore
+import android.util.Log
+import android.util.Range
+import android.view.Surface
+import androidx.camera.camera2.interop.Camera2CameraControl
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.CaptureRequestOptions
+import androidx.camera.core.Camera
+import androidx.camera.core.CameraInfo
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.DynamicRange
+import androidx.camera.core.FocusMeteringAction
+import androidx.camera.core.Preview
+import androidx.camera.core.UseCaseGroup
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.video.AudioStats
+import androidx.camera.video.MediaStoreOutputOptions
+import androidx.camera.video.Quality
+import androidx.camera.video.QualitySelector
+import androidx.camera.video.Recorder
+import androidx.camera.video.Recording
+import androidx.camera.video.VideoCapture
+import androidx.camera.video.VideoRecordEvent
+import androidx.camera.view.PreviewView
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.LifecycleOwner
+import com.cinematic.camera.color.ColorProcessor
+import com.cinematic.camera.color.Grade
+import com.cinematic.camera.color.toJson
+import com.cinematic.camera.media.Clips
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.util.UUID
+import kotlin.math.roundToInt
+
+enum class Pipeline(val label: String) {
+    CLEAN("LOOK PREVIEW / CLEAN FILE"),
+    BAKED("LOOK BAKED"),
+    DIRECT("DIRECT / CLEAN FILE"),
+}
+
+enum class Take { IDLE, STARTING, RECORDING, STOPPING, VERIFYING }
+
+data class Lens(val id: String, val label: String, val facing: Int)
+data class Format(val quality: Quality, val width: Int, val height: Int, val rates: List<Int>) {
+    val label: String get() = "${height}p"
+}
+data class Sensor(
+    val iso: Int? = null, val shutter: Long? = null, val focus: Float? = null,
+    val awb: Int? = null, val aeLocked: Boolean = false, val af: Int? = null,
+    val ev: Int? = null, val eis: Boolean? = null, val awbLocked: Boolean = false,
+)
+data class Controls(
+    val iso: Range<Int>? = null, val shutter: Range<Long>? = null,
+    val focus: Float = 0f, val ev: Range<Int>? = null, val evStep: Float = 0f,
+    val aeLock: Boolean = false, val wbLock: Boolean = false, val whiteBalance: List<Int> = emptyList(),
+    val eis: Boolean = false, val zoom: ClosedFloatingPointRange<Float> = 1f..1f,
+    val level: Int? = null, val physicalIds: Set<String> = emptySet(),
+)
+data class Manual(
+    val iso: Int? = null, val shutter: Long? = null, val focus: Float? = null,
+    val wb: Int? = null, val aeLock: Boolean = false, val wbLock: Boolean = false,
+)
+data class CaptureState(
+    val lenses: List<Lens> = emptyList(), val lens: Lens? = null,
+    val formats: List<Format> = emptyList(), val format: Format? = null,
+    val fps: Int? = null, val bitrate: Int = 12, val pipeline: Pipeline = Pipeline.DIRECT,
+    val stabilization: Boolean = false, val lite: Boolean = false, val audio: Boolean = true,
+    val ready: Boolean = false, val gpuFailed: Boolean = false, val busy: Take = Take.IDLE,
+    val duration: Long = 0, val amplitude: Double? = null, val bytes: Long = 0,
+    val thermal: Int = 0, val message: String? = null, val warning: String? = null,
+    val controls: Controls = Controls(), val sensor: Sensor = Sensor(), val manual: Manual = Manual(),
+    val zoom: Float = 1f, val clipRevision: Int = 0,
+    val ev: Int = 0, val audioIssue: Boolean = false,
+) {
+    val active: Boolean get() = busy != Take.IDLE
+    val timecode: String get() {
+        val seconds = duration / 1_000_000_000
+        return "%02d:%02d:%02d".format(java.util.Locale.ROOT, seconds / 3600, seconds / 60 % 60, seconds % 60)
+    }
+    val remainingMinutes: Long get() = ((bytes - 96L * 1024 * 1024).coerceAtLeast(0) * 8 /
+        ((bitrate * 1_000_000L + if (audio) 256_000 else 0) * 60))
+}
+
+class CameraEngine(context: Context, private val owner: LifecycleOwner) {
+    private val app = context.applicationContext
+    private val main = ContextCompat.getMainExecutor(app)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val stateFlow = MutableStateFlow(CaptureState())
+    val state = stateFlow.asStateFlow()
+    private val scopeFrames = MutableStateFlow<ByteArray?>(null)
+    val scopeSamples = scopeFrames.asStateFlow()
+    private var scopes = false
+    val clips = Clips(app)
+    private var view: PreviewView? = null
+    private var provider: ProcessCameraProvider? = null
+    private var camera: Camera? = null
+    private var preview: Preview? = null
+    private var video: VideoCapture<Recorder>? = null
+    private var recording: Recording? = null
+    private var processor: ColorProcessor? = null
+    private var binding = 0
+    private var disposed = false
+    private var lastRequest = 0
+    private var grade = Grade()
+    private var compare = false
+    private var split = false
+    private val power = app.getSystemService(PowerManager::class.java)
+    private val monitor = scope.launch {
+        while (true) {
+            val bytes = withContext(Dispatchers.IO) { freeBytes() }
+            val heat = if (Build.VERSION.SDK_INT >= 29) power.currentThermalStatus else 0
+            val warning = when {
+                bytes < stopBytes -> "Storage is too low to continue recording."
+                heat >= 4 -> "Device is too hot to continue recording."
+                bytes < 250L * 1024 * 1024 -> "Storage is low."
+                heat >= 3 -> "Device is hot. Consider Lite preview or direct capture on the next take."
+                else -> null
+            }
+            stateFlow.update { it.copy(bytes = bytes, thermal = heat, warning = warning) }
+            if (bytes < stopBytes || heat >= 4) stop()
+            delay(1500)
+        }
+    }
+
+    fun attach(target: PreviewView) {
+        if (disposed || view === target) return
+        view = target
+        val existing = provider
+        if (existing != null) {
+            bind()
+            return
+        }
+        val future = ProcessCameraProvider.getInstance(app)
+        future.addListener({
+            if (disposed) return@addListener
+            runCatching {
+                provider = future.get()
+                val lenses = provider!!.availableCameraInfos.map { info ->
+                    val facing = info.lensFacing
+                    val id = Camera2CameraInfo.from(info).cameraId
+                    val direction = when (facing) {
+                        CameraSelector.LENS_FACING_BACK -> "Rear"
+                        CameraSelector.LENS_FACING_FRONT -> "Front"
+                        else -> "External"
+                    }
+                    Lens(id, "$direction · $id", facing)
+                }.sortedBy { it.facing != CameraSelector.LENS_FACING_BACK }
+                stateFlow.update { it.copy(lenses = lenses) }
+                val first = lenses.firstOrNull()
+                if (first == null) tell("Android reports no usable camera.")
+                else selectLens(first, initial = true)
+            }.onFailure { problem("Camera initialization failed", it) }
+        }, main)
+    }
+
+    fun selectLens(lens: Lens, initial: Boolean = false) {
+        if (state.value.active || (!initial && lens == state.value.lens)) return
+        val info = provider?.availableCameraInfos?.firstOrNull { Camera2CameraInfo.from(it).cameraId == lens.id }
+            ?: return
+        val formats = formats(info)
+        val format = formats.firstOrNull { it.quality == state.value.format?.quality } ?: formats.firstOrNull()
+        val fps = state.value.fps?.takeIf { it in format?.rates.orEmpty() }
+            ?: format?.rates?.firstOrNull { it == 30 }
+        val old = state.value
+        val changes = buildList {
+            if (!initial && format?.quality != old.format?.quality) add("resolution")
+            if (!initial && fps != old.fps) add("frame rate")
+            if (!initial && old.stabilization) add("stabilization")
+        }
+        stateFlow.update {
+            it.copy(lens = lens, formats = formats, format = format, fps = fps, ready = false,
+                controls = capabilities(info), manual = Manual(), sensor = Sensor(), stabilization = false,
+                ev = 0, zoom = 1f, message = if (changes.isEmpty()) null else "Lens switch changed ${changes.joinToString()} for the next take.")
+        }
+        bind()
+    }
+
+    fun flip() {
+        val current = state.value.lens
+        val next = state.value.lenses.firstOrNull { it.facing != current?.facing }
+            ?: state.value.lenses.firstOrNull { it.id != current?.id }
+        if (next != null) selectLens(next) else tell("Android exposes one camera.")
+    }
+
+    fun configure(format: Format? = state.value.format, fps: Int? = state.value.fps,
+                  bitrate: Int = state.value.bitrate, pipeline: Pipeline = state.value.pipeline,
+                  stabilization: Boolean = state.value.stabilization) {
+        val old = state.value
+        if (old.active || (fps != null && fps !in format?.rates.orEmpty()) ||
+            (format != null && format !in old.formats) || bitrate !in 4..32 ||
+            (stabilization && !old.controls.eis)) return
+        if (format == old.format && fps == old.fps && bitrate == old.bitrate &&
+            pipeline == old.pipeline && stabilization == old.stabilization && old.ready) return
+        stateFlow.update { it.copy(format = format, fps = fps, bitrate = bitrate, pipeline = pipeline,
+            stabilization = stabilization, manual = Manual(), ev = 0, zoom = 1f,
+            message = null, gpuFailed = false) }
+        bind()
+    }
+
+    fun setAudio(enabled: Boolean) {
+        if (!state.value.active) stateFlow.update { it.copy(audio = enabled) }
+    }
+
+    fun scopes(enabled: Boolean) {
+        scopes = enabled
+        processor?.scopeEnabled = enabled
+        if (!enabled) scopeFrames.value = null
+    }
+
+    fun setLite(enabled: Boolean) {
+        if (state.value.active) return
+        stateFlow.update { it.copy(lite = enabled) }
+        processor?.lite = enabled
+    }
+
+    fun render(value: Grade, comparing: Boolean = false, splitView: Boolean = false) {
+        if (state.value.active) return
+        grade = value
+        compare = comparing
+        split = splitView
+        processor?.apply { grade = value; compare = comparing; split = splitView }
+    }
+
+    fun orientation(rotation: Int) {
+        if (state.value.active) return
+        preview?.targetRotation = rotation
+        video?.targetRotation = rotation
+    }
+
+    private fun bind() {
+        val provider = provider ?: return
+        val view = view ?: return
+        val lens = state.value.lens ?: return
+        val generation = ++binding
+        scopeFrames.value = null
+        provider.unbindAll()
+        processor?.close()
+        processor = null
+        camera = null
+        video = null
+        preview = null
+        stateFlow.update { it.copy(ready = false, sensor = Sensor(), gpuFailed = false) }
+        val configuration = state.value
+        val selector = CameraSelector.Builder().addCameraFilter { candidates ->
+            candidates.filter { Camera2CameraInfo.from(it).cameraId == lens.id }
+        }.build()
+        try {
+            val rotation = view.display?.rotation ?: Surface.ROTATION_0
+            val previewBuilder = Preview.Builder().setTargetRotation(rotation)
+            val callback = object : CameraCaptureSession.CaptureCallback() {
+                private var last = 0L
+                override fun onCaptureCompleted(session: CameraCaptureSession, request: CaptureRequest, result: TotalCaptureResult) {
+                    val now = SystemClock.elapsedRealtime()
+                    if (now - last < 200) return
+                    last = now
+                    val sample = Sensor(result.get(CaptureResult.SENSOR_SENSITIVITY),
+                        result.get(CaptureResult.SENSOR_EXPOSURE_TIME),
+                        result.get(CaptureResult.LENS_FOCUS_DISTANCE),
+                        result.get(CaptureResult.CONTROL_AWB_MODE),
+                        result.get(CaptureResult.CONTROL_AE_LOCK) == true,
+                        result.get(CaptureResult.CONTROL_AF_STATE),
+                        result.get(CaptureResult.CONTROL_AE_EXPOSURE_COMPENSATION),
+                        result.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE)?.let { it != 0 },
+                        result.get(CaptureResult.CONTROL_AWB_LOCK) == true)
+                    main.execute {
+                        if (!disposed && binding == generation) stateFlow.update { it.copy(sensor = sample) }
+                    }
+                }
+            }
+            Camera2Interop.Extender(previewBuilder).setSessionCaptureCallback(callback)
+            val surface = previewBuilder.build().also { it.surfaceProvider = view.surfaceProvider }
+            val group = UseCaseGroup.Builder().addUseCase(surface)
+            val capture = configuration.format?.let { format ->
+                val recorder = Recorder.Builder().setQualitySelector(QualitySelector.from(format.quality))
+                    .setTargetVideoEncodingBitRate(configuration.bitrate * 1_000_000).build()
+                VideoCapture.Builder(recorder).setDynamicRange(DynamicRange.SDR)
+                    .setTargetRotation(rotation).setVideoStabilizationEnabled(configuration.stabilization)
+                    .apply { configuration.fps?.let { setTargetFrameRate(Range(it, it)) } }.build()
+                    .also { group.addUseCase(it) }
+            }
+            if (configuration.pipeline != Pipeline.DIRECT) {
+                val effect = ColorProcessor(configuration.pipeline == Pipeline.BAKED, samples = { frame ->
+                    main.execute { if (binding == generation && scopes) scopeFrames.value = frame }
+                }) { error ->
+                    if (binding == generation && !disposed) {
+                        stateFlow.update { it.copy(gpuFailed = true, ready = false) }
+                        problem("Color pipeline failed. Choose direct capture or retry", error)
+                        stop()
+                    }
+                }
+                effect.grade = grade
+                effect.compare = compare
+                effect.split = split
+                effect.lite = configuration.lite
+                effect.scopeEnabled = scopes
+                processor = effect
+                group.addEffect(effect.effect)
+            }
+            val bound = provider.bindToLifecycle(owner, selector, group.build())
+            camera = bound
+            preview = surface
+            video = capture
+            bound.cameraInfo.cameraState.observe(owner) { result ->
+                if (binding == generation) {
+                    result.error?.let { problem("Camera session error ${it.code}", it.cause) }
+                    stateFlow.update { it.copy(ready = result.type == androidx.camera.core.CameraState.Type.OPEN &&
+                        !it.gpuFailed && result.error == null && capture != null) }
+                }
+            }
+        } catch (error: Exception) {
+            processor?.close()
+            processor = null
+            problem("This camera configuration did not bind. Try direct capture or a lower resolution", error)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    fun start(selectedGrade: Grade) {
+        val current = state.value
+        val capture = video ?: return
+        if (!current.ready || current.active) return
+        if (current.bytes < stopBytes || current.thermal >= 4) {
+            tell("Recording is blocked by storage or device temperature.")
+            return
+        }
+        if (current.audio && !permission(Manifest.permission.RECORD_AUDIO)) {
+            tell("Allow microphone access or turn audio off in Settings.")
+            return
+        }
+        if (Build.VERSION.SDK_INT < 29 && !permission(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
+            tell("Storage permission is required to save this take.")
+            return
+        }
+        grade = selectedGrade
+        processor?.apply { grade = selectedGrade; compare = false; split = false }
+        val title = "CAM_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}"
+        val values = ContentValues().apply {
+            put(MediaStore.Video.Media.DISPLAY_NAME, "$title.mp4")
+            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+            if (Build.VERSION.SDK_INT >= 29) put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/Cinematic Camera")
+        }
+        val options = MediaStoreOutputOptions.Builder(app.contentResolver,
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI).setContentValues(values).build()
+        val metadata = JSONObject().apply {
+            put("cameraId", current.lens?.id)
+            put("pipeline", current.pipeline.name)
+            put("requestedResolution", current.format?.label)
+            put("requestedFps", current.fps ?: "camera automatic")
+            put("targetBitrateMbps", current.bitrate)
+            put("audioRequested", current.audio)
+            put("stabilizationRequested", current.stabilization)
+            put("isoAtStartRequest", current.sensor.iso)
+            put("exposureNsAtStartRequest", current.sensor.shutter)
+            put("focusDioptersAtStartRequest", current.sensor.focus)
+            put("awbModeAtStartRequest", current.sensor.awb)
+            put("dynamicRangeRequested", "SDR")
+            if (current.pipeline != Pipeline.DIRECT) put("look", selectedGrade.toJson())
+        }
+        stateFlow.update { it.copy(busy = Take.STARTING, duration = 0, amplitude = null,
+            message = null, audioIssue = false) }
+        try {
+            val pending = capture.output.prepareRecording(app, options)
+            if (current.audio) pending.withAudioEnabled()
+            recording = pending.start(main) { event ->
+                val stats = event.recordingStats
+                val activeAudio = stats.audioStats.audioState == AudioStats.AUDIO_STATE_ACTIVE
+                stateFlow.update {
+                    it.copy(duration = stats.recordedDurationNanos,
+                        amplitude = stats.audioStats.audioAmplitude.takeIf { activeAudio && it.isFinite() && it >= 0 },
+                        audioIssue = it.audioIssue || (current.audio && stats.audioStats.hasError()))
+                }
+                when (event) {
+                    is VideoRecordEvent.Start -> stateFlow.update {
+                        if (it.busy == Take.STARTING) it.copy(busy = Take.RECORDING) else it
+                    }
+                    is VideoRecordEvent.Finalize -> {
+                        recording = null
+                        metadata.put("recorderError", event.error)
+                        metadata.put("audioIssue", state.value.audioIssue)
+                        metadata.put("recordedBytes", stats.numBytesRecorded)
+                        if (event.hasError()) Log.w("CinematicCamera", "Recorder finalized with ${event.error}", event.cause)
+                        stateFlow.update { it.copy(busy = Take.VERIFYING, amplitude = null) }
+                        val uri = event.outputResults.outputUri
+                        scope.launch {
+                            val message = withContext(Dispatchers.IO) {
+                                if (uri == android.net.Uri.EMPTY) "No video was written (recorder status ${event.error})."
+                                else runCatching {
+                                    selectedGrade.look.cube?.takeIf { current.pipeline != Pipeline.DIRECT }?.let { cube ->
+                                        metadata.put("cube", buildString { cube.writeTo(this) })
+                                    }
+                                    val measured = runCatching { clips.inspect(uri) }.onFailure {
+                                        Log.w("CinematicCamera", "Could not inspect $uri", it)
+                                    }.getOrNull()
+                                    clips.save(uri, title, metadata, measured)
+                                    when {
+                                        measured == null -> "File retained. MP4 tracks could not be verified."
+                                        event.hasError() -> "Recovered video after recorder status ${event.error}."
+                                        current.audio && !measured.optBoolean("audioTrack") -> "Video saved without a microphone track."
+                                        state.value.audioIssue -> "Video saved. The microphone reported an error."
+                                        else -> "Clip saved and MP4 tracks verified."
+                                    }
+                                }.getOrElse { "Video retained in Movies. Look manifest could not be saved." }
+                            }
+                            stateFlow.update { it.copy(busy = Take.IDLE, message = message, clipRevision = it.clipRevision + 1) }
+                            processor?.compare = compare
+                            processor?.split = split
+                        }
+                    }
+                }
+            }
+        } catch (error: Exception) {
+            stateFlow.update { it.copy(busy = Take.IDLE) }
+            processor?.compare = compare
+            processor?.split = split
+            problem("Could not start recording", error)
+        }
+    }
+
+    fun stop() {
+        val running = recording ?: return
+        if (state.value.busy == Take.STOPPING) return
+        stateFlow.update { it.copy(busy = Take.STOPPING) }
+        running.stop()
+    }
+
+    fun focus(x: Float, y: Float, lock: Boolean) {
+        val view = view ?: return
+        val camera = camera ?: return
+        if (state.value.manual.focus != null) {
+            tell("Switch optical focus to Auto before using tap focus.")
+            return
+        }
+        val point = view.meteringPointFactory.createPoint(x, y)
+        val action = FocusMeteringAction.Builder(point, FocusMeteringAction.FLAG_AF)
+            .apply {
+                if (state.value.manual.iso == null && !state.value.manual.aeLock) addPoint(point, FocusMeteringAction.FLAG_AE)
+                if (lock) disableAutoCancel()
+            }.build()
+        if (!camera.cameraInfo.isFocusMeteringSupported(action)) {
+            tell("This camera does not expose focus or exposure metering at this point.")
+            return
+        }
+        val future = camera.cameraControl.startFocusAndMetering(action)
+        future.addListener({
+            if (this.camera !== camera) return@addListener
+            runCatching { future.get() }.onSuccess { result ->
+                tell(if (result.isFocusSuccessful) if (lock) "Autofocus held. Use Release AF to restore continuous focus."
+                    else "Focus acquired." else "Autofocus did not confirm a lock.")
+            }.onFailure {
+                if (it.cause !is androidx.camera.core.CameraControl.OperationCanceledException) problem("Metering failed", it)
+            }
+        }, main)
+    }
+
+    fun releaseFocus() { camera?.cameraControl?.cancelFocusAndMetering() }
+
+    fun zoom(value: Float) {
+        val camera = camera ?: return
+        val ratio = value.coerceIn(state.value.controls.zoom)
+        val future = camera.cameraControl.setZoomRatio(ratio)
+        future.addListener({
+            if (this.camera === camera) runCatching { future.get() }
+                .onSuccess { stateFlow.update { it.copy(zoom = ratio) } }
+        }, main)
+    }
+
+    fun ev(value: Int) {
+        val camera = camera ?: return
+        val control = state.value.controls.ev ?: return
+        if (state.value.manual.iso != null || state.value.manual.aeLock) return
+        val index = control.clamp(value)
+        val future = camera.cameraControl.setExposureCompensationIndex(index)
+        future.addListener({
+            if (this.camera === camera) runCatching { future.get() }
+                .onSuccess { stateFlow.update { it.copy(ev = index) } }
+        }, main)
+    }
+
+    fun manual(value: Manual) {
+        val camera = camera ?: return
+        val current = state.value
+        val capabilities = current.controls
+        val builder = CaptureRequestOptions.Builder()
+        if (value.iso != null && value.shutter != null) {
+            val iso = capabilities.iso?.clamp(value.iso) ?: return
+            val range = capabilities.shutter ?: return
+            val frame = current.fps?.let { 1_000_000_000L / it }
+            val shutter = range.clamp(value.shutter)
+            if (frame != null && shutter > frame) {
+                tell("Exposure time exceeds the selected frame interval.")
+                return
+            }
+            builder.setCaptureRequestOption(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+                .setCaptureRequestOption(CaptureRequest.SENSOR_SENSITIVITY, iso)
+                .setCaptureRequestOption(CaptureRequest.SENSOR_EXPOSURE_TIME, shutter)
+            if (frame != null) builder.setCaptureRequestOption(CaptureRequest.SENSOR_FRAME_DURATION, frame)
+        } else if (value.aeLock && capabilities.aeLock) {
+            builder.setCaptureRequestOption(CaptureRequest.CONTROL_AE_LOCK, true)
+        }
+        value.focus?.takeIf { capabilities.focus > 0f }?.let {
+            builder.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
+                .setCaptureRequestOption(CaptureRequest.LENS_FOCUS_DISTANCE, it.coerceIn(0f, capabilities.focus))
+        }
+        value.wb?.takeIf { it in capabilities.whiteBalance }?.let {
+            builder.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_MODE, it)
+        }
+        if (value.wbLock && capabilities.wbLock) builder.setCaptureRequestOption(CaptureRequest.CONTROL_AWB_LOCK, true)
+        val token = ++lastRequest
+        val future = Camera2CameraControl.from(camera.cameraControl).setCaptureRequestOptions(builder.build())
+        future.addListener({
+            if (this.camera === camera && token == lastRequest) runCatching { future.get() }
+                .onSuccess { stateFlow.update { it.copy(manual = value) } }
+                .onFailure { problem("Camera did not accept the manual request", it) }
+        }, main)
+    }
+
+    fun tell(message: String?) { stateFlow.update { it.copy(message = message) } }
+
+    private fun problem(text: String, error: Throwable?) {
+        Log.w("CinematicCamera", text, error)
+        tell(text)
+    }
+
+    fun close() {
+        disposed = true
+        stop()
+        monitor.cancel()
+        provider?.unbindAll()
+        processor?.close()
+        view = null
+    }
+
+    private fun permission(key: String) = ContextCompat.checkSelfPermission(app, key) == PackageManager.PERMISSION_GRANTED
+    private fun freeBytes() = runCatching { StatFs(Environment.getExternalStorageDirectory().path).availableBytes }
+        .getOrDefault(0L)
+
+    private fun formats(info: CameraInfo): List<Format> {
+        val qualities = Recorder.getVideoCapabilities(info).getSupportedQualities(DynamicRange.SDR)
+        val characteristics = Camera2CameraInfo.from(info)
+        val streams = characteristics.getCameraCharacteristic(Keys.SCALER_STREAM_CONFIGURATION_MAP)
+        val encoders = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter { it.isEncoder }
+            .mapNotNull { runCatching { it.getCapabilitiesForType("video/avc").videoCapabilities }.getOrNull() }
+        return listOf(Quality.FHD, Quality.HD, Quality.SD, Quality.UHD).filter { it in qualities }
+            .mapNotNull { quality ->
+                val size = QualitySelector.getResolution(info, quality) ?: return@mapNotNull null
+                val minDuration = runCatching { streams?.getOutputMinFrameDuration(android.graphics.SurfaceTexture::class.java, size) }
+                    .getOrNull() ?: 0
+                val rates = info.supportedFrameRateRanges.filter { it.lower == it.upper && it.upper in setOf(24, 25, 30, 50, 60) }
+                    .map { it.upper }.filter { fps ->
+                        (minDuration == 0L || fps <= (1e9 / minDuration).roundToInt()) &&
+                            encoders.any { it.areSizeAndRateSupported(size.width, size.height, fps.toDouble()) }
+                    }.distinct().sorted()
+                Format(quality, size.width, size.height, rates)
+            }
+    }
+
+    private fun capabilities(info: CameraInfo): Controls {
+        val camera2 = Camera2CameraInfo.from(info)
+        val manualSensor = camera2.getCameraCharacteristic(Keys.REQUEST_AVAILABLE_CAPABILITIES)
+            ?.contains(Keys.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR) == true
+        val zoom = info.zoomState.value
+        val ev = info.exposureState
+        return Controls(
+            iso = if (manualSensor) camera2.getCameraCharacteristic(Keys.SENSOR_INFO_SENSITIVITY_RANGE) else null,
+            shutter = if (manualSensor) camera2.getCameraCharacteristic(Keys.SENSOR_INFO_EXPOSURE_TIME_RANGE) else null,
+            focus = camera2.getCameraCharacteristic(Keys.LENS_INFO_MINIMUM_FOCUS_DISTANCE) ?: 0f,
+            ev = ev.exposureCompensationRange.takeIf { ev.isExposureCompensationSupported },
+            evStep = ev.exposureCompensationStep.toFloat(),
+            aeLock = camera2.getCameraCharacteristic(Keys.CONTROL_AE_LOCK_AVAILABLE) == true,
+            wbLock = camera2.getCameraCharacteristic(Keys.CONTROL_AWB_LOCK_AVAILABLE) == true,
+            whiteBalance = camera2.getCameraCharacteristic(Keys.CONTROL_AWB_AVAILABLE_MODES)
+                ?.filter { it in 2..8 }.orEmpty(),
+            eis = Recorder.getVideoCapabilities(info).isStabilizationSupported,
+            zoom = (zoom?.minZoomRatio ?: 1f)..(zoom?.maxZoomRatio ?: 1f),
+            level = camera2.getCameraCharacteristic(Keys.INFO_SUPPORTED_HARDWARE_LEVEL),
+            physicalIds = if (Build.VERSION.SDK_INT >= 28) info.physicalCameraInfos
+                .map { Camera2CameraInfo.from(it).cameraId }.toSet() else emptySet(),
+        )
+    }
+
+    private companion object { const val stopBytes = 96L * 1024 * 1024 }
+}
