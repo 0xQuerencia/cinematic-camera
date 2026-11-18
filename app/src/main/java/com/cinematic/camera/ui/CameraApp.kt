@@ -264,6 +264,7 @@ fun CameraApp(engine: CameraEngine) {
                     Telemetry("WB", wbLabel(state.sensor.awb)) { drawer = Drawer.WB }
                     Telemetry("LENS", state.lens?.label ?: "—", !state.active) { drawer = Drawer.LENS }
                     Telemetry("CODEC", "AVC target", !state.active) { drawer = Drawer.OUTPUT }
+                    if (landscape) Telemetry("LOOK", grade.look.name, !state.active) { drawer = Drawer.LOOKS }
                 }
             }
             val dock: @Composable (Boolean) -> Unit = { vertical ->
@@ -294,6 +295,8 @@ fun CameraApp(engine: CameraEngine) {
                             if (state.pipeline == Pipeline.DIRECT) engine.configure(pipeline = Pipeline.CLEAN)
                             lab = true
                         }
+                        IconKey(ToolIcon.FLIP, "Switch camera", enabled = !state.active && state.lenses.size > 1,
+                            action = engine::flip)
                     }
                     liveContent(Modifier.weight(1f).fillMaxHeight())
                     if (!left && !lab) dock(true)
@@ -329,7 +332,7 @@ fun CameraApp(engine: CameraEngine) {
                         }
                     }
                 }
-                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                if (!landscape) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Key(grade.look.name, enabled = !state.active) { drawer = Drawer.LOOKS }
                     Key("Look Lab", enabled = !state.active) {
@@ -508,7 +511,7 @@ private fun CaptureDock(state: CaptureState, vertical: Boolean, onRecord: () -> 
     val keys: @Composable () -> Unit = {
         IconKey(ToolIcon.LIBRARY, "Media library", enabled = !state.active, action = onLibrary)
         RecordKey(state.busy, state.busy == Take.RECORDING || (state.busy == Take.IDLE && state.ready), onRecord)
-        IconKey(ToolIcon.FLIP, "Switch camera", enabled = !state.active && state.lenses.size > 1, action = onFlip)
+        if (!vertical) IconKey(ToolIcon.FLIP, "Switch camera", enabled = !state.active && state.lenses.size > 1, action = onFlip)
         IconKey(ToolIcon.TOOLS, "Manual controls", action = onTools)
     }
     if (vertical) Column(Modifier.width(76.dp).fillMaxHeight().verticalScroll(rememberScrollState()),
