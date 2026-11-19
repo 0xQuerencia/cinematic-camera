@@ -125,6 +125,24 @@ val originalLooks by lazy {
                     .coerceIn(0f, 1f)
             }.toFloatArray()
         })
+    // Original SDR Rec.709 split-tone looks; no external LUT licenses or downloads.
+    fun filmLook(name: String, family: String, contrast: Float, saturation: Float,
+                 shadows: FloatArray, highlights: FloatArray, fade: Float = 0f,
+                 shoulder: Float = .06f): Look =
+        Look(name, family, Cube.create(17) { r, g, b ->
+            val luma = .2126f * r + .7152f * g + .0722f * b
+            val shadowWeight = (1f - luma).pow(1.65f)
+            val highlightWeight = luma.pow(1.65f)
+            val original = floatArrayOf(r, g, b)
+            FloatArray(3) { channel ->
+                val separated = luma + (original[channel] - luma) * saturation
+                val midtone = (separated - .5f) * contrast + .5f
+                val faded = midtone * (1f - fade) + fade * .075f
+                val soft = faded - shoulder * ((faded - .55f).coerceAtLeast(0f)).pow(2f)
+                (soft + shadows[channel] * shadowWeight + highlights[channel] * highlightWeight)
+                    .coerceIn(0f, 1f)
+            }
+        })
     listOf(
         Look("Neutral", "Natural", null),
         look("Clean Commercial", "Natural", 1.06f, 1.10f, 0f, 0f),
@@ -140,6 +158,45 @@ val originalLooks by lazy {
         look("Bleach Bypass", "Dramatic", 1.30f, .43f, -.03f, -.02f, .05f),
         look("Crushed B&W", "Dramatic", 1.33f, 0f, 0f, -.025f),
         look("Pastel", "Social", .84f, .93f, .07f, .06f, .025f),
+        filmLook("Soft Highlight", "Natural", .92f, 1.02f,
+            floatArrayOf(.008f, .013f, .020f), floatArrayOf(.010f, .006f, -.005f), shoulder = .14f),
+        filmLook("Warm Print", "Filmic", 1.12f, 1.02f,
+            floatArrayOf(-.015f, .005f, .016f), floatArrayOf(.037f, .015f, -.012f)),
+        filmLook("Dusty Rose", "Filmic", .94f, .84f,
+            floatArrayOf(.016f, -.012f, .017f), floatArrayOf(.027f, .006f, .012f), fade = .065f),
+        filmLook("Amber Analog", "Filmic", 1.07f, .91f,
+            floatArrayOf(-.004f, .012f, -.009f), floatArrayOf(.047f, .017f, -.019f), fade = .027f),
+        filmLook("Forest Film", "Landscape", 1.04f, .92f,
+            floatArrayOf(-.015f, .018f, .013f), floatArrayOf(.024f, .022f, -.014f), fade = .012f),
+        filmLook("Rainy City", "Cool", 1.08f, .79f,
+            floatArrayOf(-.022f, .013f, .036f), floatArrayOf(-.015f, .003f, .019f), fade = .015f),
+        filmLook("Neon Nocturne", "Night", 1.08f, 1.14f,
+            floatArrayOf(-.018f, -.009f, .046f), floatArrayOf(.026f, -.015f, .022f),
+            fade = .024f, shoulder = .11f),
+        filmLook("Night Amber", "Night", 1.01f, .82f,
+            floatArrayOf(.003f, -.018f, .033f), floatArrayOf(.049f, .017f, -.019f),
+            fade = .035f, shoulder = .12f),
+        filmLook("Coastal Air", "Bright", .96f, .90f,
+            floatArrayOf(-.018f, .014f, .027f), floatArrayOf(.012f, .014f, -.010f),
+            fade = .022f, shoulder = .13f),
+        filmLook("Copper Dusk", "Warm", 1.10f, .89f,
+            floatArrayOf(-.010f, .016f, .015f), floatArrayOf(.059f, .020f, -.021f),
+            fade = .013f),
+        filmLook("Silver Screen", "Dramatic", 1.13f, 0f,
+            floatArrayOf(0f, 0f, 0f), floatArrayOf(0f, 0f, 0f),
+            fade = .011f, shoulder = .12f),
+        filmLook("Muted Moss", "Landscape", .98f, .78f,
+            floatArrayOf(.000f, .016f, -.010f), floatArrayOf(.020f, .020f, -.008f),
+            fade = .042f),
+        filmLook("Electric Blue", "Cool", 1.06f, 1.12f,
+            floatArrayOf(-.019f, -.002f, .049f), floatArrayOf(-.022f, .010f, .034f),
+            shoulder = .10f),
+        filmLook("Vintage Chrome", "Filmic", 1.10f, .86f,
+            floatArrayOf(-.012f, .012f, .021f), floatArrayOf(.026f, .015f, -.003f),
+            fade = .031f),
+        filmLook("Saffron", "Warm", 1.07f, 1.05f,
+            floatArrayOf(.004f, -.008f, -.017f), floatArrayOf(.049f, .025f, -.024f),
+            shoulder = .095f),
     )
 }
 
