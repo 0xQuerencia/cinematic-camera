@@ -373,6 +373,8 @@ fun CameraApp(engine: CameraEngine) {
                 if (!pro) LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     item {
                         Key("Auto Look", selected = autoLook, enabled = !state.active) { toggleAutoLook() }
+                    }
+                    item {
                         Key("Looks", enabled = !state.active) { drawer = Drawer.LOOKS }
                     }
                     items(originalLooks, key = { it.name }) { look ->
@@ -385,7 +387,7 @@ fun CameraApp(engine: CameraEngine) {
                 }
                 if (!landscape) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Key("Auto", selected = autoLook, enabled = !state.active) { toggleAutoLook() }
+                    if (pro) Key("Auto", selected = autoLook, enabled = !state.active) { toggleAutoLook() }
                     Key(grade.look.name, enabled = !state.active) { drawer = Drawer.LOOKS }
                     Key("Look Lab", enabled = !state.active) {
                         autoLook = false
