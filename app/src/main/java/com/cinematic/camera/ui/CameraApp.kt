@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.view.MotionEvent
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.view.PreviewView
@@ -23,6 +24,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
@@ -47,6 +49,7 @@ import com.cinematic.camera.color.LookStorage
 import com.cinematic.camera.color.SavedLook
 import com.cinematic.camera.color.originalLooks
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -58,6 +61,10 @@ private val audioKey = booleanPreferencesKey("audio")
 private val liteKey = booleanPreferencesKey("lite_preview")
 private val favoriteKey = stringSetPreferencesKey("favorites")
 private val leftKey = booleanPreferencesKey("left_handed")
+private val quickLooks by lazy {
+    val featured = listOf("Neutral", "Golden Hour", "Film Print", "Steel Blue")
+    originalLooks.sortedBy { featured.indexOf(it.name).takeIf { index -> index >= 0 } ?: featured.size }
+}
 internal enum class Drawer(val label: String) {
     OUTPUT("Output"), EXPOSURE("Exposure"), FOCUS("Focus"), WB("White balance"),
     LENS("Lens"), AUDIO("Audio"), TOOLS("Manual controls"), LOOKS("Looks & presets"),
@@ -70,7 +77,7 @@ fun CameraApp(engine: CameraEngine) {
     val context = LocalContext.current
     val state by engine.state.collectAsStateWithLifecycle()
     val prefs by context.preferences.data.collectAsStateWithLifecycle(initialValue = null)
-    val pro = prefs?.get(proKey) ?: true
+    val pro = prefs?.get(proKey) ?: false
     val left = prefs?.get(leftKey) ?: false
     val scope = rememberCoroutineScope()
     val audioEnabled = prefs?.get(audioKey) ?: true
@@ -84,10 +91,14 @@ fun CameraApp(engine: CameraEngine) {
     val storage = remember { LookStorage(context) }
     var hasCamera by remember { mutableStateOf(context.granted(Manifest.permission.CAMERA)) }
     var drawer by rememberSaveable { mutableStateOf<Drawer?>(null) }
-    LaunchedEffect(drawer) { engine.pausePreview(drawer == Drawer.MEDIA) }
+
     var guide by rememberSaveable { mutableStateOf("Off") }
     var instrument by rememberSaveable { mutableStateOf(ScopeMode.OFF) }
     var lab by rememberSaveable { mutableStateOf(false) }
+    val library = drawer == Drawer.LOOKS || drawer == Drawer.MEDIA
+    BackHandler(library || lab) { if (library) drawer = null else lab = false }
+    LaunchedEffect(library) { engine.pausePreview(library) }
+    fun selectMode(value: Boolean) { scope.launch { context.preferences.edit { it[proKey] = value } } }
     LaunchedEffect(instrument, lab) { engine.scopes(instrument != ScopeMode.OFF && !lab) }
     var compare by remember { mutableStateOf(false) }
     var split by rememberSaveable { mutableStateOf(true) }
@@ -228,126 +239,6 @@ fun CameraApp(engine: CameraEngine) {
         if (skipped.isNotEmpty()) engine.tell("Preset adapted. Skipped ${skipped.joinToString()}.")
     }
 
-    val notice = state.warning ?: if (state.audioIssue && state.active) "Microphone reported an error." else state.message
-    val live = remember {
-        movableContentOf<Modifier, String, Boolean, () -> Unit> { modifier, frame, available, permission ->
-            Viewfinder(engine, view, modifier, frame, available, permission)
-        }
-    }
-    BoxWithConstraints(Modifier.fillMaxSize().background(Ink).windowInsetsPadding(WindowInsets.safeDrawing)) {
-        val landscape = maxWidth > maxHeight && maxWidth >= 600.dp
-        val margin = if (landscape) 12.dp else 16.dp
-        Column(Modifier.fillMaxSize().padding(horizontal = margin), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(Modifier.fillMaxWidth().heightIn(min = 56.dp), verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                IconKey(if (lab) ToolIcon.BACK else ToolIcon.SETTINGS, if (lab) "Back to camera" else "Settings",
-                    enabled = !state.active) { if (lab) lab = false else drawer = Drawer.SETTINGS }
-                if (lab) Text("Look Lab", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
-                else {
-                    Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Key("Simple", selected = !pro) { scope.launch { context.preferences.edit { it[proKey] = false } } }
-                        Key("Pro", selected = pro) { scope.launch { context.preferences.edit { it[proKey] = true } } }
-                    }
-                    Key("${state.format?.label ?: "—"} · ${state.fps ?: "Auto"}", enabled = !state.active) {
-                        drawer = Drawer.OUTPUT
-                    }
-                }
-            }
-            if (pro && !lab) {
-                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).background(Panel),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    Telemetry("RES", state.format?.label ?: "—", !state.active) { drawer = Drawer.OUTPUT }
-                    Telemetry("FPS", state.fps?.let { "$it target" } ?: "Auto", !state.active) { drawer = Drawer.OUTPUT }
-                    Telemetry("SHUTTER", state.sensor.shutter.shutterLabel()) { drawer = Drawer.EXPOSURE }
-                    Telemetry("ISO", state.sensor.iso?.toString() ?: "—") { drawer = Drawer.EXPOSURE }
-                    Telemetry("FOCUS", state.sensor.focus?.let { "%.2f D".format(it) } ?: "—") { drawer = Drawer.FOCUS }
-                    Telemetry("WB", wbLabel(state.sensor.awb)) { drawer = Drawer.WB }
-                    Telemetry("LENS", state.lens?.label ?: "—", !state.active) { drawer = Drawer.LENS }
-                    Telemetry("CODEC", "AVC target", !state.active) { drawer = Drawer.OUTPUT }
-                    if (landscape) Telemetry("LOOK", grade.look.name, !state.active) { drawer = Drawer.LOOKS }
-                }
-            }
-            val dock: @Composable (Boolean) -> Unit = { vertical ->
-                CaptureDock(state, vertical, onRecord = ::record, onLibrary = { drawer = Drawer.MEDIA },
-                    onFlip = engine::flip, onTools = { drawer = Drawer.TOOLS })
-            }
-            val liveContent: @Composable (Modifier) -> Unit = { modifier ->
-                Box(modifier.background(Color.Black)) {
-                    live(Modifier.fillMaxSize(), guide, hasCamera) { cameraPermission.launch(Manifest.permission.CAMERA) }
-                    if (state.busy == Take.RECORDING) {
-                        Text("● REC ${state.timecode}", Modifier.align(Alignment.TopStart).padding(8.dp)
-                            .background(Ink.copy(alpha = .84f), InstrumentShape).padding(8.dp), color = Record, style = Timecode)
-                    }
-                    if (!lab && instrument != ScopeMode.OFF && state.pipeline != Pipeline.DIRECT) {
-                        ScopeOverlay(engine, instrument, Modifier.align(Alignment.TopEnd).padding(8.dp))
-                    }
-                    if (!lab && state.pipeline != Pipeline.DIRECT && hasCamera && !state.active) {
-                        CompareKey(compare, Modifier.align(Alignment.BottomEnd).padding(8.dp)) { compare = it }
-                    }
-                }
-            }
-            if (landscape) {
-                Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    if (left && !lab) dock(true)
-                    if (!lab) Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        IconKey(ToolIcon.GRID, "Frame guides and scopes", selected = guide != "Off") { drawer = Drawer.MONITOR }
-                        IconKey(ToolIcon.LOOK, "Look Lab", enabled = !state.active) {
-                            if (state.pipeline == Pipeline.DIRECT) engine.configure(pipeline = Pipeline.CLEAN)
-                            lab = true
-                        }
-                        IconKey(ToolIcon.FLIP, "Switch camera", enabled = !state.active && state.lenses.size > 1,
-                            action = engine::flip)
-                    }
-                    liveContent(Modifier.weight(1f).fillMaxHeight())
-                    if (!left && !lab) dock(true)
-                    if (lab) Box(Modifier.widthIn(max = 340.dp).fillMaxHeight()) {
-                        LookLab(grade, split, history.isNotEmpty(), undone.isNotEmpty(), state.lite,
-                            change = { value, checkpoint -> edit(value, checkpoint) }, onSplit = { split = !split },
-                            undo = { undone = undone + grade; grade = history.last(); history = history.dropLast(1) },
-                            redo = { history = history + grade; grade = undone.last(); undone = undone.dropLast(1) },
-                            save = { saveName = currentSaved?.name.orEmpty(); saveAs = false }, looks = { drawer = Drawer.LOOKS })
-                    }
-                }
-            } else {
-                liveContent(Modifier.weight(1f).fillMaxWidth())
-                if (lab) Box(Modifier.weight(.9f).fillMaxWidth()) {
-                    LookLab(grade, split, history.isNotEmpty(), undone.isNotEmpty(), state.lite,
-                        change = { value, checkpoint -> edit(value, checkpoint) }, onSplit = { split = !split },
-                        undo = { undone = undone + grade; grade = history.last(); history = history.dropLast(1) },
-                        redo = { history = history + grade; grade = undone.last(); undone = undone.dropLast(1) },
-                        save = { saveName = currentSaved?.name.orEmpty(); saveAs = false }, looks = { drawer = Drawer.LOOKS })
-                }
-            }
-            if (!lab) {
-                CaptureStatus(state, notice)
-                if (!pro) LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    item {
-                        Key("Looks", enabled = !state.active) { drawer = Drawer.LOOKS }
-                    }
-                    items(originalLooks, key = { it.name }) { look ->
-                        Column(Modifier.width(88.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                            LookSwatch(look, Modifier.fillMaxWidth().height(28.dp))
-                            Key(look.name, Modifier.fillMaxWidth(), selected = grade.look === look,
-                                enabled = !state.active) { choose(look) }
-                        }
-                    }
-                }
-                if (!landscape) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Key(grade.look.name, enabled = !state.active) { drawer = Drawer.LOOKS }
-                    Key("Look Lab", enabled = !state.active) {
-                        if (state.pipeline == Pipeline.DIRECT) engine.configure(pipeline = Pipeline.CLEAN)
-                        lab = true
-                    }
-                    Key("Guides", selected = guide != "Off") { drawer = Drawer.MONITOR }
-                    if (!pro) Key("Exposure") { drawer = Drawer.EXPOSURE }
-                }
-                if (!landscape) dock(false)
-            } else if (notice != null) Hint(notice, Amber)
-        }
-    }
-
-    val deviceReport = { diagnostics(state) }
     fun quickPreset(choice: StoryPreset) {
         val format = state.formats.firstOrNull { it.label == "1080p" }
             ?: state.formats.firstOrNull { it.label == "720p" } ?: state.format
@@ -360,7 +251,174 @@ fun CameraApp(engine: CameraEngine) {
         drawer = null
         if (choice.fps != null && rate == null) engine.tell("${choice.name} requested ${choice.fps} fps. This lens and resolution use Auto.")
     }
-    drawer?.let { panel ->
+
+    val notice = state.warning ?: if (state.audioIssue && state.active) "Microphone reported an error." else state.message
+    val live = remember {
+        movableContentOf<Modifier, String, Boolean, () -> Unit> { modifier, frame, available, permission ->
+            Viewfinder(engine, view, modifier, frame, available, permission)
+        }
+    }
+    BoxWithConstraints(Modifier.fillMaxSize().background(Ink).windowInsetsPadding(WindowInsets.safeDrawing)) {
+        val landscape = maxWidth > maxHeight && maxWidth >= 600.dp
+        SideEffect {
+            view.scaleType = if (!landscape && (!pro || lab)) PreviewView.ScaleType.FILL_CENTER else PreviewView.ScaleType.FIT_CENTER
+        }
+        val liveContent: @Composable (Modifier) -> Unit = { modifier ->
+                Box(modifier.background(Color.Black)) {
+                    live(Modifier.fillMaxSize(), guide, hasCamera) { cameraPermission.launch(Manifest.permission.CAMERA) }
+                    if (lab && split && hasCamera && !state.gpuFailed) {
+                        Box(Modifier.align(Alignment.Center).fillMaxHeight().width(1.dp).background(Paper.copy(alpha = .68f)))
+                        Hint("Before", Paper, Modifier.align(Alignment.BottomStart).padding(10.dp).background(Chrome).padding(5.dp))
+                        Hint("After", Paper, Modifier.align(Alignment.BottomEnd).padding(10.dp).background(Chrome).padding(5.dp))
+                    }
+                    if (state.busy == Take.RECORDING) {
+                        Text("● REC ${state.timecode}", Modifier.align(Alignment.TopCenter).padding(top = if (!pro && !landscape && !lab) 64.dp else 8.dp)
+                            .background(Ink.copy(alpha = .84f), InstrumentShape).padding(8.dp), color = Record, style = Timecode)
+                    }
+                    if (!lab && instrument != ScopeMode.OFF && state.pipeline != Pipeline.DIRECT) {
+                        ScopeOverlay(engine, instrument, Modifier.align(Alignment.TopEnd).padding(8.dp))
+                    }
+                    if (!lab && state.pipeline != Pipeline.DIRECT && hasCamera && !state.active) {
+                        CompareKey(compare, Modifier.align(Alignment.BottomEnd).padding(end = 8.dp, bottom = if (!pro && !landscape) 168.dp else 8.dp)) { compare = it }
+                    }
+                }
+            }
+        if (library) {
+            val panel = checkNotNull(drawer)
+            Column(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
+                Row(Modifier.fillMaxWidth().heightIn(min = 58.dp), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    IconKey(ToolIcon.BACK, "Back to camera") { drawer = null }
+                    Text(panel.label, Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+                }
+                LibraryBody(panel, Modifier.weight(1f), engine, state.clipRevision, ::exportFile) {
+                    LooksPanel(originalLooks, saved, favoriteNames, importing,
+                        choose = { choose(it); drawer = null }, apply = ::applySaved,
+                        favorite = { name -> scope.launch { context.preferences.edit { settings ->
+                            val existing = settings[favoriteKey].orEmpty()
+                            settings[favoriteKey] = if (name in existing) existing - name else existing + name
+                        } } },
+                        import = { import.launch(arrayOf("*/*")) }, quick = ::quickPreset,
+                        save = { preset -> saveName = if (preset) "" else currentSaved?.name.orEmpty(); saveAs = preset },
+                        export = { item -> exportFile("${item.name}.json", storage.encode(item)) })
+                }
+                LibraryNav(panel, onCamera = { drawer = null; lab = false },
+                    onLab = {
+                        drawer = null
+                        if (state.pipeline == Pipeline.DIRECT) engine.configure(pipeline = Pipeline.CLEAN)
+                        lab = true
+                    },
+                    onLooks = { drawer = Drawer.LOOKS }, onMedia = { drawer = Drawer.MEDIA })
+            }
+        } else if (!pro && !lab && !landscape) {
+            SimpleCapture(state, grade.look, quickLooks, notice, guide != "Off", Modifier.fillMaxSize(),
+                ::selectMode, { drawer = Drawer.SETTINGS }, { drawer = Drawer.MONITOR }, { drawer = Drawer.EXPOSURE },
+                { drawer = Drawer.LOOKS }, ::choose, { drawer = Drawer.MEDIA }, ::record, engine::flip, liveContent)
+        } else {
+            val margin = if (landscape) 12.dp else 16.dp
+            Column(Modifier.fillMaxSize().padding(horizontal = margin), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (!landscape || lab || !pro) Row(Modifier.fillMaxWidth().heightIn(min = 56.dp), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    IconKey(if (lab) ToolIcon.BACK else ToolIcon.SETTINGS, if (lab) "Back to camera" else "Settings",
+                        enabled = !state.active) { if (lab) lab = false else drawer = Drawer.SETTINGS }
+                    if (lab) Text("Look Lab", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
+                    else {
+                        Box(Modifier.weight(1f)) { ModeSwitch(pro, !state.active, ::selectMode) }
+                        Key("${state.format?.label ?: "—"} · ${state.fps ?: "Auto"}", enabled = !state.active) {
+                            drawer = Drawer.OUTPUT
+                        }
+                    }
+                }
+                if (pro && !lab) {
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                        .clip(InstrumentShape).background(Panel),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        if (landscape) {
+                            IconKey(ToolIcon.SETTINGS, "Settings", enabled = !state.active) { drawer = Drawer.SETTINGS }
+                            Spacer(Modifier.width(4.dp))
+                        }
+                        Telemetry("RES", state.format?.label ?: "—", !state.active) { drawer = Drawer.OUTPUT }
+                        Telemetry("FPS", state.fps?.let { "$it target" } ?: "Auto", !state.active) { drawer = Drawer.OUTPUT }
+                        Telemetry("CODEC", "AVC target", !state.active) { drawer = Drawer.OUTPUT }
+                        Telemetry("LUT", grade.look.name, !state.active) { drawer = Drawer.LOOKS }
+                        Telemetry("LENS", state.lens?.label ?: "—", !state.active) { drawer = Drawer.LENS }
+                        Telemetry("STAB", if (state.stabilization) "On" else "Off", !state.active) { drawer = Drawer.OUTPUT }
+                        if (landscape) ModeSwitch(pro, !state.active, ::selectMode)
+                    }
+                }
+                val dock: @Composable (Boolean) -> Unit = { vertical ->
+                    CaptureDock(state, vertical, onRecord = ::record, onLibrary = { drawer = Drawer.MEDIA },
+                        onFlip = engine::flip, onTools = { drawer = Drawer.TOOLS })
+                }
+                if (landscape) {
+                    Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (left && !lab) dock(true)
+                        if (!lab) Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            IconKey(ToolIcon.SCOPE, "Monitoring", selected = instrument != ScopeMode.OFF) { drawer = Drawer.MONITOR }
+                            IconKey(ToolIcon.GRID, "Frame guides", selected = guide != "Off") { drawer = Drawer.MONITOR }
+                            IconKey(ToolIcon.LOOK, "Look Lab", enabled = !state.active) {
+                                if (state.pipeline == Pipeline.DIRECT) engine.configure(pipeline = Pipeline.CLEAN)
+                                lab = true
+                            }
+                            IconKey(ToolIcon.FLIP, "Switch camera", enabled = !state.active && state.lenses.size > 1,
+                                action = engine::flip)
+                        }
+                        Column(Modifier.weight(1f).fillMaxHeight()) {
+                            liveContent(Modifier.weight(1f).fillMaxWidth().clip(InstrumentShape))
+                            if (pro && !lab) ExposureStrip(state) { drawer = it }
+                        }
+                        if (!left && !lab) dock(true)
+                        if (lab) Box(Modifier.widthIn(max = 340.dp).fillMaxHeight()) {
+                            LookLab(grade, split, history.isNotEmpty(), undone.isNotEmpty(), state.lite,
+                                change = { value, checkpoint -> edit(value, checkpoint) }, onSplit = { split = !split },
+                                undo = { undone = undone + grade; grade = history.last(); history = history.dropLast(1) },
+                                redo = { history = history + grade; grade = undone.last(); undone = undone.dropLast(1) },
+                                save = { saveName = currentSaved?.name.orEmpty(); saveAs = false }, looks = { drawer = Drawer.LOOKS })
+                        }
+                    }
+                } else {
+                    liveContent(Modifier.weight(if (lab) 1f else 1.7f).fillMaxWidth().clip(CardShape))
+                    if (pro && !lab) ExposureStrip(state) { drawer = it }
+                    if (lab) Box(Modifier.weight(.9f).fillMaxWidth()) {
+                        LookLab(grade, split, history.isNotEmpty(), undone.isNotEmpty(), state.lite,
+                            change = { value, checkpoint -> edit(value, checkpoint) }, onSplit = { split = !split },
+                            undo = { undone = undone + grade; grade = history.last(); history = history.dropLast(1) },
+                            redo = { history = history + grade; grade = undone.last(); undone = undone.dropLast(1) },
+                            save = { saveName = currentSaved?.name.orEmpty(); saveAs = false }, looks = { drawer = Drawer.LOOKS })
+                    }
+                }
+                if (!lab) {
+                    CaptureStatus(state, notice)
+                    if (!pro) LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        item {
+                            Key("Looks", enabled = !state.active) { drawer = Drawer.LOOKS }
+                        }
+                        items(originalLooks, key = { it.name }) { look ->
+                            Column(Modifier.width(88.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                                LookSwatch(look, Modifier.fillMaxWidth().height(28.dp))
+                                Key(look.name, Modifier.fillMaxWidth(), selected = grade.look === look,
+                                    enabled = !state.active) { choose(look) }
+                            }
+                        }
+                    }
+                    if (!landscape) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Key(grade.look.name, enabled = !state.active) { drawer = Drawer.LOOKS }
+                        Key("Look Lab", enabled = !state.active) {
+                            if (state.pipeline == Pipeline.DIRECT) engine.configure(pipeline = Pipeline.CLEAN)
+                            lab = true
+                        }
+                        Key("Guides", selected = guide != "Off") { drawer = Drawer.MONITOR }
+                        if (!pro) Key("Exposure") { drawer = Drawer.EXPOSURE }
+                    }
+                    if (!landscape) dock(false)
+                } else if (notice != null) Hint(notice, Amber)
+            }
+        }
+    }
+
+    val deviceReport = { diagnostics(state) }
+    drawer?.takeUnless { library }?.let { panel ->
         ModalBottomSheet(onDismissRequest = { drawer = null }, containerColor = Raised,
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
             Column(Modifier.fillMaxWidth().heightIn(max = (LocalConfiguration.current.screenHeightDp * .72f).dp)
@@ -378,10 +436,7 @@ fun CameraApp(engine: CameraEngine) {
                     Drawer.WB -> WhiteBalancePanel(state, engine) { drawer = null; lab = true }
                     Drawer.LENS -> LensPanel(state, engine)
                     Drawer.AUDIO -> AudioPanel(state, ::setAudio)
-                    Drawer.TOOLS -> {
-                        listOf(Drawer.EXPOSURE, Drawer.FOCUS, Drawer.WB, Drawer.LENS, Drawer.AUDIO, Drawer.OUTPUT, Drawer.MONITOR)
-                            .forEach { target -> Key(target.label, Modifier.fillMaxWidth()) { drawer = target } }
-                    }
+                    Drawer.TOOLS -> QuickControls { drawer = it }
                     Drawer.MONITOR -> MonitorPanel(guide, { guide = it }, state, instrument, { instrument = it })
                     Drawer.SETTINGS -> {
                         Key("Recording format", Modifier.fillMaxWidth()) { drawer = Drawer.OUTPUT }
@@ -397,16 +452,7 @@ fun CameraApp(engine: CameraEngine) {
                         Key("Export device report") { exportFile("cinematic-device.json", deviceReport().toString(2)) }
                         Text(deviceReport().toString(2), style = Timecode, color = Secondary)
                     }
-                    Drawer.LOOKS -> LooksPanel(originalLooks, saved, favoriteNames, importing,
-                        choose = { choose(it); drawer = null }, apply = ::applySaved,
-                        favorite = { name -> scope.launch { context.preferences.edit { settings ->
-                            val existing = settings[favoriteKey].orEmpty()
-                            settings[favoriteKey] = if (name in existing) existing - name else existing + name
-                        } } },
-                        import = { import.launch(arrayOf("*/*")) }, quick = ::quickPreset,
-                        save = { preset -> saveName = if (preset) "" else currentSaved?.name.orEmpty(); saveAs = preset },
-                        export = { item -> exportFile("${item.name}.json", storage.encode(item)) })
-                    Drawer.MEDIA -> MediaPanel(engine, state.clipRevision, ::exportFile)
+                    Drawer.LOOKS, Drawer.MEDIA -> Unit
                 }
             }
         }
@@ -455,12 +501,20 @@ internal val guides = listOf("Off", "Thirds", "16:9", "9:16", "1:1", "2.39:1")
 @Composable
 private fun Viewfinder(engine: CameraEngine, target: PreviewView, modifier: Modifier, guide: String,
                        available: Boolean, request: () -> Unit) {
+    var focusTarget by remember { mutableStateOf<Offset?>(null) }
+    LaunchedEffect(focusTarget) {
+        if (focusTarget != null) {
+            delay(950)
+            focusTarget = null
+        }
+    }
     Box(modifier, contentAlignment = Alignment.Center) {
         if (available) {
             AndroidView(factory = {
                 var tapped: Offset? = null
                 target.setOnClickListener {
                     val point = tapped ?: Offset(target.width / 2f, target.height / 2f)
+                    focusTarget = point
                     engine.focus(point.x, point.y, false)
                 }
                 val detector = android.view.GestureDetector(it, object : android.view.GestureDetector.SimpleOnGestureListener() {
@@ -471,7 +525,10 @@ private fun Viewfinder(engine: CameraEngine, target: PreviewView, modifier: Modi
                         tapped = null
                         return true
                     }
-                    override fun onLongPress(e: MotionEvent) { engine.focus(e.x, e.y, true) }
+                    override fun onLongPress(e: MotionEvent) {
+                        focusTarget = Offset(e.x, e.y)
+                        engine.focus(e.x, e.y, true)
+                    }
                 })
                 target.contentDescription = "Live camera viewfinder"
                 target.setOnTouchListener { _, event -> detector.onTouchEvent(event) }
@@ -494,6 +551,16 @@ private fun Viewfinder(engine: CameraEngine, target: PreviewView, modifier: Modi
                     val height = width / ratio
                     drawRect(color, Offset((size.width - width) / 2, (size.height - height) / 2),
                         androidx.compose.ui.geometry.Size(width, height), style = Stroke(stroke))
+                }
+            }
+            val point = focusTarget
+            if (point != null) Canvas(Modifier.fillMaxSize()) {
+                val radius = 21.dp.toPx()
+                val corner = 8.dp.toPx()
+                for (vertical in listOf(-1, 1)) for (horizontal in listOf(-1, 1)) {
+                    val start = Offset(point.x + horizontal * radius, point.y + vertical * radius)
+                    drawLine(Amber, start, start - Offset(horizontal * corner, 0f), 1.5.dp.toPx())
+                    drawLine(Amber, start, start - Offset(0f, vertical * corner), 1.5.dp.toPx())
                 }
             }
         } else Column(Modifier.padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally,
@@ -555,4 +622,12 @@ private fun CompareKey(compare: Boolean, modifier: Modifier, toggle: (Boolean) -
         }.compareAction(if (compare) "Restore look" else "Compare with original") { action(!compare) }, contentAlignment = Alignment.Center) {
         Hint(if (compare) "Before" else "A/B", if (compare) Amber else Paper)
     }
+}
+
+@Composable
+private fun LibraryBody(panel: Drawer, modifier: Modifier, engine: CameraEngine, revision: Int,
+                        export: (String, String) -> Unit, looks: @Composable () -> Unit) {
+    if (panel == Drawer.MEDIA) MediaPanel(engine, revision, export, modifier)
+    else Column(modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(bottom = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)) { looks() }
 }

@@ -9,6 +9,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -62,8 +63,9 @@ fun InstrumentTheme(content: @Composable () -> Unit) {
             bodyMedium = TextStyle(fontSize = 14.sp, lineHeight = 20.sp, fontWeight = FontWeight.Medium),
             bodySmall = TextStyle(fontSize = 12.sp, lineHeight = 16.sp, fontWeight = FontWeight.Medium),
         ),
-        content = content,
-    )
+    ) {
+        CompositionLocalProvider(LocalContentColor provides Paper, content = content)
+    }
 }
 
 @Composable
@@ -79,12 +81,12 @@ internal fun Key(label: String, modifier: Modifier = Modifier, selected: Boolean
 }
 
 @Composable
-internal fun Telemetry(label: String, value: String, enabled: Boolean = true, action: () -> Unit) {
+internal fun Telemetry(label: String, value: String, enabled: Boolean = true, emphasized: Boolean = false, action: () -> Unit) {
     Column(Modifier.widthIn(min = 72.dp).heightIn(min = 56.dp)
         .clickable(enabled = enabled, role = Role.Button, onClick = action)
         .padding(horizontal = 12.dp, vertical = 6.dp), verticalArrangement = Arrangement.Center) {
         Text(label, color = Muted, style = MaterialTheme.typography.bodySmall)
-        Text(value, style = Numeric, color = Paper)
+        Text(value, style = Numeric, color = if (emphasized) Amber else Paper)
     }
     VerticalDivider(Modifier.height(32.dp), color = Rule)
 }
@@ -117,7 +119,7 @@ internal fun RecordKey(take: Take, enabled: Boolean, action: () -> Unit) {
     }
 }
 
-internal enum class ToolIcon { SETTINGS, LIBRARY, FLIP, TOOLS, GRID, LOOK, BACK }
+internal enum class ToolIcon { SETTINGS, LIBRARY, FLIP, TOOLS, GRID, LOOK, BACK, STAR, SCOPE, CAMERA }
 
 @Composable
 internal fun IconKey(icon: ToolIcon, label: String, enabled: Boolean = true, selected: Boolean = false,
@@ -125,37 +127,58 @@ internal fun IconKey(icon: ToolIcon, label: String, enabled: Boolean = true, sel
     Box(Modifier.size(48.dp).clip(InstrumentShape).background(if (selected) Selected else Panel)
         .border(1.dp, Rule, InstrumentShape).semantics { contentDescription = label }
         .clickable(enabled = enabled, role = Role.Button, onClick = action), contentAlignment = Alignment.Center) {
-        Canvas(Modifier.size(20.dp)) {
-            val color = if (!enabled) Muted else if (selected) Amber else Paper
-            val stroke = 1.8.dp.toPx()
-            fun point(x: Float, y: Float) = Offset(size.width * x / 20f, size.height * y / 20f)
-            fun line(x: Float, y: Float, a: Float, b: Float) =
-                drawLine(color, point(x,y), point(a,b), stroke, StrokeCap.Round)
-            fun box(x: Float, y: Float, w: Float, h: Float) =
-                drawRect(color, point(x,y), Size(size.width*w/20, size.height*h/20), style = Stroke(stroke))
-            when (icon) {
-                ToolIcon.SETTINGS, ToolIcon.TOOLS -> {
-                    line(2f,4f,18f,4f); line(2f,10f,18f,10f); line(2f,16f,18f,16f)
-                    line(6f,2f,6f,6f); line(14f,8f,14f,12f); line(8f,14f,8f,18f)
-                }
-                ToolIcon.LIBRARY -> { box(2f,4f,16f,12f); line(6f,2f,16f,2f); line(7f,9f,10f,12f); line(10f,12f,14f,8f) }
-                ToolIcon.FLIP -> {
-                    line(3f,6f,17f,6f); line(17f,6f,13f,2f); line(17f,6f,13f,10f)
-                    line(17f,14f,3f,14f); line(3f,14f,7f,10f); line(3f,14f,7f,18f)
-                }
-                ToolIcon.GRID -> { box(2f,2f,16f,16f); line(7f,2f,7f,18f); line(13f,2f,13f,18f); line(2f,7f,18f,7f); line(2f,13f,18f,13f) }
-                ToolIcon.LOOK -> {
-                    line(10f,2f,18f,10f); line(18f,10f,10f,18f); line(10f,18f,2f,10f); line(2f,10f,10f,2f); line(10f,2f,10f,18f)
-                }
-                ToolIcon.BACK -> { line(3f,10f,17f,10f); line(3f,10f,9f,4f); line(3f,10f,9f,16f) }
+        ToolGlyph(icon, if (!enabled) Muted else if (selected) Amber else Paper)
+    }
+}
+
+@Composable
+internal fun ToolGlyph(icon: ToolIcon, color: Color) {
+    Canvas(Modifier.size(20.dp)) {
+        val stroke = 1.8.dp.toPx()
+        fun point(x: Float, y: Float) = Offset(size.width * x / 20f, size.height * y / 20f)
+        fun line(x: Float, y: Float, a: Float, b: Float) =
+            drawLine(color, point(x,y), point(a,b), stroke, StrokeCap.Round)
+        fun box(x: Float, y: Float, w: Float, h: Float) =
+            drawRect(color, point(x,y), Size(size.width*w/20, size.height*h/20), style = Stroke(stroke))
+        when (icon) {
+            ToolIcon.SETTINGS, ToolIcon.TOOLS -> {
+                line(2f,4f,18f,4f); line(2f,10f,18f,10f); line(2f,16f,18f,16f)
+                line(6f,2f,6f,6f); line(14f,8f,14f,12f); line(8f,14f,8f,18f)
             }
+            ToolIcon.LIBRARY -> { box(2f,4f,16f,12f); line(6f,2f,16f,2f); line(7f,9f,10f,12f); line(10f,12f,14f,8f) }
+            ToolIcon.FLIP -> {
+                line(3f,6f,17f,6f); line(17f,6f,13f,2f); line(17f,6f,13f,10f)
+                line(17f,14f,3f,14f); line(3f,14f,7f,10f); line(3f,14f,7f,18f)
+            }
+            ToolIcon.GRID -> { box(2f,2f,16f,16f); line(7f,2f,7f,18f); line(13f,2f,13f,18f); line(2f,7f,18f,7f); line(2f,13f,18f,13f) }
+            ToolIcon.LOOK -> {
+                line(10f,2f,18f,10f); line(18f,10f,10f,18f); line(10f,18f,2f,10f); line(2f,10f,10f,2f); line(10f,2f,10f,18f)
+            }
+            ToolIcon.CAMERA -> { box(2f,5f,11f,10f); line(13f,8f,18f,5f); line(18f,5f,18f,15f); line(18f,15f,13f,12f) }
+            ToolIcon.SCOPE -> {
+                line(2f,17f,18f,17f); line(5f,14f,5f,10f); line(8f,14f,8f,6f)
+                line(11f,14f,11f,3f); line(14f,14f,14f,8f); line(17f,14f,17f,12f)
+            }
+            ToolIcon.STAR -> {
+                val star = androidx.compose.ui.graphics.Path()
+                for (i in 0..9) {
+                    val angle = (i * 36 - 90) * Math.PI / 180
+                    val radius = if (i % 2 == 0) 8.2 else 3.8
+                    val p = point((10 + kotlin.math.cos(angle) * radius).toFloat(),
+                        (10 + kotlin.math.sin(angle) * radius).toFloat())
+                    if (i == 0) star.moveTo(p.x, p.y) else star.lineTo(p.x, p.y)
+                }
+                star.close()
+                drawPath(star, color, style = Stroke(stroke, cap = StrokeCap.Round))
+            }
+            ToolIcon.BACK -> { line(3f,10f,17f,10f); line(3f,10f,9f,4f); line(3f,10f,9f,16f) }
         }
     }
 }
 
 @Composable
-internal fun Hint(text: String, color: Color = Muted) =
-    Text(text, color = color, style = MaterialTheme.typography.bodySmall)
+internal fun Hint(text: String, color: Color = Muted, modifier: Modifier = Modifier) =
+    Text(text, modifier, color = color, style = MaterialTheme.typography.bodySmall)
 
 internal fun Modifier.compareAction(label: String, action: () -> Unit): Modifier =
     semantics {

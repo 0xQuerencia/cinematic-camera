@@ -236,3 +236,7 @@ The app should never silently change sensor mode, frame rate, resolution, color 
 6. Test usability and captured output on a genuinely low-cost Android device before polishing advanced animation.
 
 **Non-goals:** copying Blackmagic trade dress, representing concept photos as camera output, promising universal hardware features, or shipping an APK from a visual prototype alone.
+
+## Visual reference update
+
+The three user-supplied camera boards define the capture and library layout. Simple uses a full-height crop-to-fill live preview and a compact overlay with an amber mode switch, exposure control, photographic look strip and centered record button. Pro uses separate format and exposure strips, a center viewfinder and side rails in landscape. The encoded framing remains accessible in Pro with fit-to-frame preview. Library screens use fixed headers and destination buttons with scrolling content. Look Lab uses a framed live A/B preview, compact amber sliders and tabbed adjustments. Each look thumbnail applies its cube to the same licensed reference photo. [Reference photo](https://images.unsplash.com/photo-1464822759023-fed622ff2c3b) · [Unsplash License](https://unsplash.com/license)
