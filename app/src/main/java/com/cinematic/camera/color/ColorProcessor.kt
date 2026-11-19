@@ -35,6 +35,7 @@ class ColorProcessor(
     @Volatile var split = false
     @Volatile var lite = false
     @Volatile var scopeEnabled = false
+    @Volatile var autoSampleEnabled = false
 
     private var display = EGL.EGL_NO_DISPLAY
     private var context = EGL.EGL_NO_CONTEXT
@@ -162,11 +163,16 @@ class ColorProcessor(
             EGLExt.eglPresentationTimeANDROID(display, window, input.timestamp)
             check(EGL.eglSwapBuffers(display, window)) { "GPU output swap failed." }
         }
-        if (scopeEnabled && input.timestamp >= nextScopeNs) {
-            nextScopeNs = input.timestamp + if (lite) 650_000_000 else 350_000_000
+        if ((scopeEnabled || autoSampleEnabled) && input.timestamp >= nextScopeNs) {
+            nextScopeNs = input.timestamp + when {
+                scopeEnabled && lite -> 650_000_000L
+                scopeEnabled -> 350_000_000L
+                else -> 1_200_000_000L
+            }
             runCatching { readScope() }.onFailure {
                 scopeEnabled = false
-                android.util.Log.w("CinematicCamera", "Scope readback disabled", it)
+                autoSampleEnabled = false
+                android.util.Log.w("CinematicCamera", "GPU sample readback disabled", it)
                 samples(ByteArray(0))
             }
         }
