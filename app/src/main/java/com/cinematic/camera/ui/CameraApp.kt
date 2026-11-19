@@ -101,6 +101,13 @@ fun CameraApp(engine: CameraEngine) {
     LaunchedEffect(autoLook, lab, state.active) {
         engine.autoLookSampling(autoLook && !lab && !state.active)
     }
+    LaunchedEffect(lab) {
+        if (lab && autoLook) {
+            autoLook = false
+            autoReason = null
+            autoPicker.reset()
+        }
+    }
     var saved by remember { mutableStateOf<List<SavedLook>>(emptyList()) }
     val favoriteNames = prefs?.get(favoriteKey).orEmpty()
     var history by remember { mutableStateOf(listOf<Grade>()) }
