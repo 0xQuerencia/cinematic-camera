@@ -4,7 +4,7 @@
 
 The rebuilt debug APK uses the three supplied boards for the layout of Simple, Pro, Look Lab, and the looks and media libraries. Emulator screenshots showed a live Simple viewfinder, landscape Pro rails with separate format and exposure strips, a live Golden Hour A/B split, a photographic LUT grid, and MediaStore clip thumbnails and metadata. The redesign keeps native camera readouts and the existing slider controls.
 
-The redesign APK SHA-256 is `8d93779a882276aa3897afd2d25754bb3e247f26e4cdba98055616aa49a10c2d`. The Gradle build, five JVM tests, three Android instrumentation tests, APK signature check, and Android Lint passed. The capture and color measurements below describe the original development build.
+The redesign APK SHA-256 is `ad118a0a77de3f88afe903d4baab64f36433fe124de90158a7a3ddc3ff5b2c48`. The Gradle build, eight JVM tests, three Android instrumentation tests, APK signature check, and Android Lint passed. The capture and color measurements below describe the original development build.
 
 ## Build and automated checks
 
