@@ -79,6 +79,7 @@ internal fun SimpleCapture(
     onExposure: () -> Unit, onLooks: () -> Unit, selectLook: (Look) -> Unit,
     onLibrary: () -> Unit, onRecord: () -> Unit, onFlip: () -> Unit,
     autoLook: Boolean, autoStatus: String?, onAutoLook: () -> Unit,
+    compareControl: @Composable () -> Unit,
     preview: @Composable (Modifier) -> Unit,
 ) {
     Box(modifier) {
@@ -97,6 +98,7 @@ internal fun SimpleCapture(
                 }
             }
             Box(Modifier.weight(1f).fillMaxWidth()) {
+                Box(Modifier.align(Alignment.CenterStart)) { compareControl() }
                 Column(Modifier.align(Alignment.CenterEnd)
                     .clip(InstrumentShape).background(Chrome).border(1.dp, Rule, InstrumentShape)
                     .sizeIn(minWidth = 48.dp, minHeight = 48.dp)

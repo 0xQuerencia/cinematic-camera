@@ -328,8 +328,8 @@ fun CameraApp(engine: CameraEngine) {
                     if (!lab && instrument != ScopeMode.OFF && state.pipeline != Pipeline.DIRECT) {
                         ScopeOverlay(engine, instrument, Modifier.align(Alignment.TopEnd).padding(8.dp))
                     }
-                    if (!lab && state.pipeline != Pipeline.DIRECT && hasCamera && !state.active) {
-                        CompareKey(compare, Modifier.align(Alignment.BottomEnd).padding(end = 8.dp, bottom = if (!pro && !landscape) 232.dp else 8.dp)) { compare = it }
+                    if (!lab && (pro || landscape) && state.pipeline != Pipeline.DIRECT && hasCamera && !state.active) {
+                        CompareKey(compare, Modifier.align(Alignment.BottomEnd).padding(8.dp)) { compare = it }
                     }
                 }
             }
@@ -363,7 +363,12 @@ fun CameraApp(engine: CameraEngine) {
         } else if (!pro && !lab && !landscape) {
             SimpleCapture(state, grade.look, quickLooks, notice, guide != "Off", Modifier.fillMaxSize(),
                 ::selectMode, { drawer = Drawer.SETTINGS }, { drawer = Drawer.MONITOR }, { drawer = Drawer.EXPOSURE },
-                { drawer = Drawer.LOOKS }, ::choose, { drawer = Drawer.MEDIA }, ::record, engine::flip, autoLook, autoStatus, ::toggleAutoLook, liveContent)
+                { drawer = Drawer.LOOKS }, ::choose, { drawer = Drawer.MEDIA }, ::record, engine::flip,
+                autoLook, autoStatus, ::toggleAutoLook, compareControl = {
+                    if (state.pipeline != Pipeline.DIRECT && hasCamera && !state.active) {
+                        CompareKey(compare, Modifier) { compare = it }
+                    }
+                }, preview = liveContent)
         } else {
             val margin = if (landscape) 12.dp else 16.dp
             Column(Modifier.fillMaxSize().padding(horizontal = margin), verticalArrangement = Arrangement.spacedBy(4.dp)) {
