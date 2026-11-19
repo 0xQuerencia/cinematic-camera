@@ -61,8 +61,12 @@ class CubeTest {
     }
 
     @Test fun originalCatalogHasUniqueNamesAndExportableCubes() {
-        assertEquals(14, originalLooks.size)
+        assertEquals(29, originalLooks.size)
         assertEquals(originalLooks.size, originalLooks.map { it.name }.toSet().size)
+        listOf("Golden Hour", "Moonlit", "Film Print", "Neon Nocturne",
+            "Forest Film", "Rainy City", "Soft Highlight").forEach { name ->
+            assertTrue(originalLooks.any { it.name == name && it.cube != null })
+        }
         originalLooks.drop(1).forEach { look ->
             val cube = requireNotNull(look.cube)
             val decoded = Cube.parse(buildString { cube.writeTo(this) }.reader())
