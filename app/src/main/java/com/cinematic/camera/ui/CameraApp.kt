@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.SystemClock
 import android.view.MotionEvent
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -43,6 +44,7 @@ import com.cinematic.camera.capture.CaptureState
 import com.cinematic.camera.capture.Pipeline
 import com.cinematic.camera.capture.Take
 import com.cinematic.camera.color.Cube
+import com.cinematic.camera.color.AutoLookSelector
 import com.cinematic.camera.color.Grade
 import com.cinematic.camera.color.Look
 import com.cinematic.camera.color.LookStorage
@@ -103,6 +105,20 @@ fun CameraApp(engine: CameraEngine) {
     var compare by remember { mutableStateOf(false) }
     var split by rememberSaveable { mutableStateOf(true) }
     var grade by remember { mutableStateOf(Grade()) }
+    var autoLook by rememberSaveable { mutableStateOf(false) }
+    var autoReason by remember { mutableStateOf<String?>(null) }
+    val autoPicker = remember { AutoLookSelector() }
+    val autoPixels by engine.scopeSamples.collectAsStateWithLifecycle()
+    LaunchedEffect(autoLook, lab, library, state.active) {
+        engine.autoLookSampling(autoLook && !lab && !library && !state.active)
+    }
+    LaunchedEffect(lab) {
+        if (lab && autoLook) {
+            autoLook = false
+            autoReason = null
+            autoPicker.reset()
+        }
+    }
     var saved by remember { mutableStateOf<List<SavedLook>>(emptyList()) }
     val favoriteNames = prefs?.get(favoriteKey).orEmpty()
     var history by remember { mutableStateOf(listOf<Grade>()) }
@@ -143,7 +159,16 @@ fun CameraApp(engine: CameraEngine) {
         grade = value
         if (state.pipeline == Pipeline.DIRECT && value != Grade()) engine.configure(pipeline = Pipeline.CLEAN)
     }
+    fun toggleAutoLook() {
+        if (state.active) return
+        autoLook = !autoLook
+        autoReason = if (autoLook) "Analyzing scene color and light…" else null
+        autoPicker.reset()
+        if (autoLook && state.pipeline == Pipeline.DIRECT) engine.configure(pipeline = Pipeline.CLEAN)
+    }
     fun choose(value: Look) {
+        autoLook = false
+        autoReason = null
         currentSaved = null
         if (value in originalLooks) edit(Grade(look = value))
         else edit(grade.copy(look = value))
@@ -175,6 +200,7 @@ fun CameraApp(engine: CameraEngine) {
                     }
                 } }.onSuccess {
                     saved = listOf(it) + saved
+                    autoLook = false
                     currentSaved = it
                     edit(it.grade)
                     engine.tell("Imported ${it.name}.")
@@ -185,6 +211,21 @@ fun CameraApp(engine: CameraEngine) {
     }
     LaunchedEffect(Unit) { saved = withContext(Dispatchers.IO) { storage.all() } }
     LaunchedEffect(grade, compare, split, lab, state.busy) { engine.render(grade, compare, split && lab) }
+    LaunchedEffect(autoPixels, autoLook, state.active, state.pipeline, lab, library) {
+        if (!autoLook || state.active || lab || library || state.pipeline == Pipeline.DIRECT) return@LaunchedEffect
+        val pixels = autoPixels ?: return@LaunchedEffect
+        if (pixels.isEmpty()) {
+            autoReason = "Scene analysis unavailable on this camera"
+            return@LaunchedEffect
+        }
+        val recommendation = autoPicker.consider(pixels, SystemClock.elapsedRealtime()) ?: return@LaunchedEffect
+        val selected = originalLooks.firstOrNull { it.name == recommendation.name } ?: return@LaunchedEffect
+        if (grade.look.name != selected.name || grade.strength != recommendation.strength) {
+            grade = Grade(look = selected, strength = recommendation.strength)
+            currentSaved = null
+        }
+        autoReason = recommendation.reason
+    }
     val orientation = LocalConfiguration.current.orientation
     val view = remember(context) {
         PreviewView(context).apply {
@@ -210,6 +251,8 @@ fun CameraApp(engine: CameraEngine) {
         else recordPermissions.launch(permissions.toTypedArray())
     }
     fun applySaved(item: SavedLook) {
+        autoLook = false
+        autoReason = null
         val configuration = item.capture
         val skipped = mutableListOf<String>()
         if (configuration != null) {
@@ -240,6 +283,8 @@ fun CameraApp(engine: CameraEngine) {
     }
 
     fun quickPreset(choice: StoryPreset) {
+        autoLook = false
+        autoReason = null
         val format = state.formats.firstOrNull { it.label == "1080p" }
             ?: state.formats.firstOrNull { it.label == "720p" } ?: state.format
         val rate = choice.fps?.takeIf { it in format?.rates.orEmpty() }
@@ -252,6 +297,11 @@ fun CameraApp(engine: CameraEngine) {
         if (choice.fps != null && rate == null) engine.tell("${choice.name} requested ${choice.fps} fps. This lens and resolution use Auto.")
     }
 
+    val autoStatus = if (autoLook) when {
+        state.pipeline == Pipeline.DIRECT -> "Auto Look paused · Direct capture"
+        state.active -> "Auto Look locked · ${grade.look.name}"
+        else -> "Auto Look · ${grade.look.name} · ${autoReason ?: "Analyzing scene…"}"
+    } else null
     val notice = state.warning ?: if (state.audioIssue && state.active) "Microphone reported an error." else state.message
     val live = remember {
         movableContentOf<Modifier, String, Boolean, () -> Unit> { modifier, frame, available, permission ->
@@ -279,7 +329,7 @@ fun CameraApp(engine: CameraEngine) {
                         ScopeOverlay(engine, instrument, Modifier.align(Alignment.TopEnd).padding(8.dp))
                     }
                     if (!lab && state.pipeline != Pipeline.DIRECT && hasCamera && !state.active) {
-                        CompareKey(compare, Modifier.align(Alignment.BottomEnd).padding(end = 8.dp, bottom = if (!pro && !landscape) 168.dp else 8.dp)) { compare = it }
+                        CompareKey(compare, Modifier.align(Alignment.BottomEnd).padding(end = 8.dp, bottom = if (!pro && !landscape) 232.dp else 8.dp)) { compare = it }
                     }
                 }
             }
@@ -313,7 +363,7 @@ fun CameraApp(engine: CameraEngine) {
         } else if (!pro && !lab && !landscape) {
             SimpleCapture(state, grade.look, quickLooks, notice, guide != "Off", Modifier.fillMaxSize(),
                 ::selectMode, { drawer = Drawer.SETTINGS }, { drawer = Drawer.MONITOR }, { drawer = Drawer.EXPOSURE },
-                { drawer = Drawer.LOOKS }, ::choose, { drawer = Drawer.MEDIA }, ::record, engine::flip, liveContent)
+                { drawer = Drawer.LOOKS }, ::choose, { drawer = Drawer.MEDIA }, ::record, engine::flip, autoLook, autoStatus, ::toggleAutoLook, liveContent)
         } else {
             val margin = if (landscape) 12.dp else 16.dp
             Column(Modifier.fillMaxSize().padding(horizontal = margin), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -343,7 +393,10 @@ fun CameraApp(engine: CameraEngine) {
                         Telemetry("LUT", grade.look.name, !state.active) { drawer = Drawer.LOOKS }
                         Telemetry("LENS", state.lens?.label ?: "—", !state.active) { drawer = Drawer.LENS }
                         Telemetry("STAB", if (state.stabilization) "On" else "Off", !state.active) { drawer = Drawer.OUTPUT }
-                        if (landscape) ModeSwitch(pro, !state.active, ::selectMode)
+                        if (landscape) {
+                            ModeSwitch(pro, !state.active, ::selectMode)
+                            Key("Auto Look", selected = autoLook, enabled = !state.active, action = ::toggleAutoLook)
+                        }
                     }
                 }
                 val dock: @Composable (Boolean) -> Unit = { vertical ->
@@ -388,9 +441,10 @@ fun CameraApp(engine: CameraEngine) {
                     }
                 }
                 if (!lab) {
-                    CaptureStatus(state, notice)
+                    CaptureStatus(state, notice ?: autoStatus)
                     if (!pro) LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         item {
+                            Key("Auto Look", selected = autoLook, enabled = !state.active, action = ::toggleAutoLook)
                             Key("Looks", enabled = !state.active) { drawer = Drawer.LOOKS }
                         }
                         items(originalLooks, key = { it.name }) { look ->
@@ -403,6 +457,7 @@ fun CameraApp(engine: CameraEngine) {
                     }
                     if (!landscape) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Key("Auto Look", selected = autoLook, enabled = !state.active, action = ::toggleAutoLook)
                         Key(grade.look.name, enabled = !state.active) { drawer = Drawer.LOOKS }
                         Key("Look Lab", enabled = !state.active) {
                             if (state.pipeline == Pipeline.DIRECT) engine.configure(pipeline = Pipeline.CLEAN)
@@ -449,6 +504,7 @@ fun CameraApp(engine: CameraEngine) {
                             scope.launch { context.preferences.edit { it[liteKey] = enabled } }
                         }
                         Hint("Lite skips preview bloom and halation. Baked capture uses the full selected grade.")
+                        Hint("Auto Look analyzes local color and light to pick a look before recording. A look stays fixed during each take.")
                         Key("Export device report") { exportFile("cinematic-device.json", deviceReport().toString(2)) }
                         Text(deviceReport().toString(2), style = Timecode, color = Secondary)
                     }

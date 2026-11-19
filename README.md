@@ -22,6 +22,14 @@ The package is `com.cinematic.camera`. The minimum OS is Android 8.0, API 26. An
 5. In **Media library**, open a clip to play or share it, export the manifest or its cube, or delete the video with confirmation. Use **Render graded copy** on a clean clip to apply its look with Media3 Transformer. It publishes a separate MP4 and keeps the original.
 6. **Settings → Export device report** saves the current camera's capabilities and last sensor readouts. Files land in MediaStore under **Movies/Cinematic Camera** on Android 10 and later.
 
+## Auto Look (experimental)
+
+Tap **Auto Look** in Simple or Pro mode to recommend a cinematic look from the live viewfinder. The app uses a small locally sampled SDR frame to estimate brightness, color balance, and scene colorfulness; no frames are uploaded and no model download is required. This is a creative recommendation, not calibrated automatic scene detection.
+
+Auto Look activates Clean preview if Direct was selected. It waits for three consistent scene samples and holds a recommendation for at least six seconds before changing to another look. The selected look and its strength remain **fixed while recording**. In Clean mode, the source clip retains its original colors with a look manifest; choose Baked before recording if you want the look in the saved video. Selecting a look, preset, or entering Look Lab disables Auto Look.
+
+The original Rec.709 look catalog now includes 29 looks. Import external .cube files only when you know their expected input color space. On slower phones, turn off Auto Look, enable Lite preview, or select Direct capture if preview or recorded FPS is unstable.
+
 ## Verification
 
 ```sh

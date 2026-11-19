@@ -125,6 +125,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
     private val scopeFrames = MutableStateFlow<ByteArray?>(null)
     val scopeSamples = scopeFrames.asStateFlow()
     private var scopes = false
+    private var autoLookSamples = false
     val clips = Clips(app)
     private var view: PreviewView? = null
     private var provider: ProcessCameraProvider? = null
@@ -257,7 +258,13 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
     fun scopes(enabled: Boolean) {
         scopes = enabled
         processor?.scopeEnabled = enabled
-        if (!enabled) scopeFrames.value = null
+        if (!enabled && !autoLookSamples) scopeFrames.value = null
+    }
+
+    fun autoLookSampling(enabled: Boolean) {
+        autoLookSamples = enabled
+        processor?.autoSampleEnabled = enabled
+        if (!enabled && !scopes) scopeFrames.value = null
     }
 
     fun setLite(enabled: Boolean) {
@@ -373,7 +380,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
             }
             if (configuration.pipeline != Pipeline.DIRECT) {
                 val effect = ColorProcessor(configuration.pipeline == Pipeline.BAKED, samples = { frame ->
-                    main.execute { if (binding == generation && scopes) scopeFrames.value = frame }
+                    main.execute { if (binding == generation && (scopes || autoLookSamples)) scopeFrames.value = frame }
                 }) { error ->
                     if (binding == generation && !disposed) {
                         stateFlow.update { it.copy(gpuFailed = true, ready = false) }
@@ -386,6 +393,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
                 effect.split = split
                 effect.lite = configuration.lite
                 effect.scopeEnabled = scopes
+                effect.autoSampleEnabled = autoLookSamples
                 processor = effect
                 group.addEffect(effect.effect)
             }

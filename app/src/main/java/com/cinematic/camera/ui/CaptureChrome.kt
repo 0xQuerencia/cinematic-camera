@@ -78,6 +78,7 @@ internal fun SimpleCapture(
     selectMode: (Boolean) -> Unit, onSettings: () -> Unit, onGuide: () -> Unit,
     onExposure: () -> Unit, onLooks: () -> Unit, selectLook: (Look) -> Unit,
     onLibrary: () -> Unit, onRecord: () -> Unit, onFlip: () -> Unit,
+    autoLook: Boolean, autoStatus: String?, onAutoLook: () -> Unit,
     preview: @Composable (Modifier) -> Unit,
 ) {
     Box(modifier) {
@@ -114,6 +115,12 @@ internal fun SimpleCapture(
                     Modifier.align(Alignment.CenterHorizontally).clip(InstrumentShape)
                         .background(Chrome).padding(horizontal = 8.dp, vertical = 4.dp))
                 Spacer(Modifier.height(4.dp))
+            }
+            Row(Modifier.fillMaxWidth().padding(bottom = 4.dp), verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Key("Auto Look", selected = autoLook, enabled = !state.active, action = onAutoLook)
+                if (autoStatus != null) Hint(autoStatus, Paper,
+                    Modifier.weight(1f).clip(InstrumentShape).background(Chrome).padding(6.dp))
             }
             LookStrip(looks, look, !state.active, onLooks, selectLook)
             Box(Modifier.fillMaxWidth().height(84.dp)) {
