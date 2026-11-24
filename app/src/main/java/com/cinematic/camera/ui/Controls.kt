@@ -104,6 +104,16 @@ internal fun Precision(label: String, value: Float, range: ClosedFloatingPointRa
 @Composable
 internal fun OutputPanel(state: CaptureState, engine: CameraEngine) {
     val enabled = !state.active
+    if (state.photoMode) {
+        Section("Still image format")
+        KeysRow {
+            Key("JPEG", selected = !state.rawPhoto, enabled = enabled) { engine.rawPhoto(false) }
+            Key("RAW / DNG", selected = state.rawPhoto, enabled = enabled && state.controls.rawPhoto) { engine.rawPhoto(true) }
+        }
+        Hint(if (state.controls.rawPhoto) "RAW support is advertised by this camera; saved DNG must be tested." else "This camera does not advertise RAW still capture.")
+        Hint("Photos are saved to Pictures/Cinematic Camera. Capture is ungraded.")
+        return
+    }
     Section("Resolution")
     KeysRow {
         state.formats.forEach { format ->
@@ -162,21 +172,21 @@ internal fun ExposurePanel(state: CaptureState, engine: CameraEngine, lab: () ->
             else "The camera advertises manual sensor control. Readouts come from capture results.")
         KeysRow {
             Key("Auto", selected = manual.iso == null) { engine.manual(manual.copy(iso = null, shutter = null)) }
-            Key("Manual", selected = manual.iso != null, enabled = state.fps != null && state.sensor.iso != null && state.sensor.shutter != null) {
-                val frame = 1_000_000_000L / checkNotNull(state.fps)
+            Key("Manual", selected = manual.iso != null, enabled = (state.photoMode || state.fps != null) && state.sensor.iso != null && state.sensor.shutter != null) {
+                val frame = if (state.photoMode) shutter.upper else 1_000_000_000L / checkNotNull(state.fps)
                 engine.manual(manual.copy(iso = iso.clamp(checkNotNull(state.sensor.iso)),
                     shutter = shutter.clamp(minOf(checkNotNull(state.sensor.shutter), frame)), aeLock = false))
             }
         }
-        if (state.fps == null) Hint("Select a fixed frame rate before setting manual exposure.")
+        if (!state.photoMode && state.fps == null) Hint("Select a fixed frame rate before setting manual exposure.")
         if (manual.iso != null && manual.shutter != null) {
             Precision("Sensor ISO", manual.iso.toFloat(), iso.lower.toFloat()..iso.upper.toFloat()) {
                 engine.manual(manual.copy(iso = it.roundToInt()))
             }
-            val max = minOf(shutter.upper, state.fps?.let { 1_000_000_000L / it } ?: shutter.upper)
+            val max = minOf(shutter.upper, state.fps?.takeUnless { state.photoMode }?.let { 1_000_000_000L / it } ?: shutter.upper)
             Precision("Exposure time", manual.shutter / 1_000_000f, shutter.lower / 1_000_000f..max / 1_000_000f,
                 unit = " ms") { engine.manual(manual.copy(shutter = (it * 1_000_000).roundToLong())) }
-            val fps = state.fps
+            val fps = state.fps.takeUnless { state.photoMode }
             if (fps != null && max >= shutter.lower) {
                 Section("Shutter angle")
                 val actual = state.sensor.shutter?.let { ExposureMath.nanosecondsToAngle(it, fps) }
@@ -239,7 +249,7 @@ internal fun ExposurePanel(state: CaptureState, engine: CameraEngine, lab: () ->
     if (!controls.aeLock) Hint("This lens does not advertise AE lock.")
     else Mark(if (state.sensor.aeLocked) "Native" else "Checking", if (state.sensor.aeLocked) "Capture results report AE locked." else "Available in auto exposure.")
     Mark("Assisted", "Digital exposure trim in Look Lab changes rendered brightness.")
-    Key("Open digital exposure", enabled = !state.active, action = lab)
+    Key("Open digital exposure", enabled = !state.active && !state.photoMode, action = lab)
 }
 
 @Composable
@@ -312,7 +322,7 @@ internal fun WhiteBalancePanel(state: CaptureState, engine: CameraEngine, lab: (
     }
     if (!state.controls.wbLock) Hint("This camera does not report AWB lock support.")
     Mark("Assisted", "Temperature and tint in Look Lab adjust rendered color.")
-    Key("Open color tools", enabled = !state.active, action = lab)
+    Key("Open color tools", enabled = !state.active && !state.photoMode, action = lab)
 }
 
 @Composable
