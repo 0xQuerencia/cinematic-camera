@@ -73,7 +73,7 @@ private val quickLooks by lazy {
 internal enum class Drawer(val label: String) {
     OUTPUT("Output"), EXPOSURE("Exposure"), FOCUS("Focus"), WB("White balance"),
     LENS("Lens"), AUDIO("Audio"), TOOLS("Manual controls"), LOOKS("Looks & presets"),
-    MEDIA("Media library"), COLORIST("Auto Look & colorist"), SETTINGS("Settings & diagnostics"), MONITOR("Monitoring")
+    MEDIA("Media library"), COLORIST("Auto Look & colorist"), PRODUCTION("Production & motion"), SETTINGS("Settings & diagnostics"), MONITOR("Monitoring")
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -171,7 +171,8 @@ fun CameraApp(engine: CameraEngine) {
     }
     fun openColorist() {
         if (state.active) return
-        if (state.pipeline == Pipeline.DIRECT) engine.configure(pipeline = Pipeline.CLEAN)
+        if (state.photoMode) engine.photoMode(false)
+        if (engine.state.value.pipeline == Pipeline.DIRECT) engine.configure(pipeline = Pipeline.CLEAN)
         lab = false
         drawer = Drawer.COLORIST
     }
@@ -604,9 +605,11 @@ fun CameraApp(engine: CameraEngine) {
                         export = { grade.look.cube?.let { cube ->
                             exportFile("generated-look.cube", buildString { cube.writeTo(this) })
                         } })
+                    Drawer.PRODUCTION -> ProductionPanel(state, engine)
                     Drawer.SETTINGS -> {
                         Key(if (state.photoMode) "Photo format" else "Recording format", Modifier.fillMaxWidth()) { drawer = Drawer.OUTPUT }
                         Key("Microphone", Modifier.fillMaxWidth()) { drawer = Drawer.AUDIO }
+                        Key("Production & motion", Modifier.fillMaxWidth(), enabled = !state.active) { drawer = Drawer.PRODUCTION }
                         Key("Auto Look & colorist", Modifier.fillMaxWidth(), enabled = !state.active, action = ::openColorist)
                         ToggleRow("Left-handed landscape", left, !state.active) {
                             scope.launch { context.preferences.edit { prefs -> prefs[leftKey] = it } }
