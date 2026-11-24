@@ -78,6 +78,11 @@ internal class GradeShader(private val inputTarget: Int) : AutoCloseable {
         GL.glUniform4f(location("color"), value.saturation, value.temperature, value.tint,
             if (cube != null) value.strength else 0f)
         GL.glUniform4f(location("film"), value.grain, value.vignette, value.bloom, value.halation)
+        GL.glUniform3fv(location("masterCurve"), 1, value.curves.master.values(), 0)
+        GL.glUniform3fv(location("redCurve"), 1, value.curves.red.values(), 0)
+        GL.glUniform3fv(location("greenCurve"), 1, value.curves.green.values(), 0)
+        GL.glUniform3fv(location("blueCurve"), 1, value.curves.blue.values(), 0)
+        GL.glUniform1f(location("skinProtection"), value.skinProtection)
         GL.glUniform1f(location("seed"), seed)
         GL.glUniform1i(location("lite"), if (lite) 1 else 0)
     }
@@ -142,6 +147,11 @@ private val fragmentShader = """
     uniform vec4 light;
     uniform vec4 color;
     uniform vec4 film;
+    uniform vec3 masterCurve;
+    uniform vec3 redCurve;
+    uniform vec3 greenCurve;
+    uniform vec3 blueCurve;
+    uniform float skinProtection;
     uniform float edge;
     uniform float seed;
     uniform int gradeEnabled;
@@ -151,6 +161,21 @@ private val fragmentShader = """
     in vec2 frame;
     out vec4 outputColor;
     const vec3 luma = vec3(.2126, .7152, .0722);
+    float curveAt(float inputValue, vec3 knots) {
+        float x = clamp(inputValue, 0.0, 1.0) * 4.0;
+        if (x < 1.0) return x * knots.x;
+        if (x < 2.0) return mix(knots.x, knots.y, x - 1.0);
+        if (x < 3.0) return mix(knots.y, knots.z, x - 2.0);
+        return mix(knots.z, 1.0, x - 3.0);
+    }
+    float warmMask(vec3 src) {
+        float chroma = src.r - src.b;
+        float hue = (src.r - src.g) / max(chroma, .001);
+        float y = dot(src, luma);
+        return smoothstep(.03, .12, chroma)
+            * smoothstep(.10, .30, hue) * (1.0 - smoothstep(.70, .90, hue))
+            * smoothstep(.05, .20, y) * (1.0 - smoothstep(.82, .98, y));
+    }
     void main() {
         vec3 source = texture(camera, uv).rgb;
         if (gradeEnabled == 0 || (split == 1 && frame.x < .5)) {
@@ -163,9 +188,23 @@ private val fragmentShader = """
         rgb = mix(vec3(dot(rgb, luma)), rgb, color.x);
         rgb = pow(clamp(rgb, 0.0, 1.0), vec3(light.z));
         rgb -= light.w * pow(rgb, vec3(3.0));
+        vec3 preLook = rgb;
         if (color.w > 0.0) {
             vec3 coord = clamp((rgb - domainMin) / (domainMax - domainMin), 0.0, 1.0);
             rgb = mix(rgb, texture(cube, (coord * (edge - 1.0) + .5) / edge).rgb, color.w);
+        }
+        // Identity curves leave even out-of-range imported LUT values unchanged.
+        if (any(notEqual(masterCurve, vec3(.25, .5, .75))) ||
+            any(notEqual(redCurve, vec3(.25, .5, .75))) ||
+            any(notEqual(greenCurve, vec3(.25, .5, .75))) ||
+            any(notEqual(blueCurve, vec3(.25, .5, .75)))) {
+            rgb = vec3(curveAt(curveAt(rgb.r, masterCurve), redCurve),
+                       curveAt(curveAt(rgb.g, masterCurve), greenCurve),
+                       curveAt(curveAt(rgb.b, masterCurve), blueCurve));
+        }
+        if (skinProtection > 0.0) {
+            vec3 restored = vec3(dot(rgb, luma)) + preLook - vec3(dot(preLook, luma));
+            rgb = mix(rgb, restored, skinProtection * warmMask(source));
         }
         if (lite == 0 && film.z + film.w > 0.0) {
             float glow = 0.0;
