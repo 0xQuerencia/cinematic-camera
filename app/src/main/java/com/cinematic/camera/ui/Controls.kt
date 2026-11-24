@@ -18,6 +18,7 @@ import com.cinematic.camera.capture.CameraEngine
 import com.cinematic.camera.capture.ExposureMath
 import com.cinematic.camera.capture.CaptureState
 import com.cinematic.camera.capture.Pipeline
+import com.cinematic.camera.capture.VideoProfile
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONArray
@@ -114,6 +115,14 @@ internal fun OutputPanel(state: CaptureState, engine: CameraEngine) {
         Hint("Photos are saved to Pictures/Cinematic Camera. Capture is ungraded.")
         return
     }
+    Section("Codec & dynamic range")
+    VideoProfile.entries.forEach { profile ->
+        Key(profile.label, Modifier.fillMaxWidth(), selected = state.profile == profile,
+            enabled = enabled && state.profileFormats[profile].orEmpty().isNotEmpty()) { engine.selectVideoProfile(profile) }
+        if (state.profileFormats[profile].orEmpty().isEmpty()) Hint("Not advertised for this lens and encoder.")
+    }
+    Hint("These are capture requests. Clip details report the actual codec and color metadata.")
+    if (state.profile.hdr) Hint("HLG is direct capture only. SDR LUTs are not applied to HDR footage.", Amber)
     Section("Resolution")
     KeysRow {
         state.formats.forEach { format ->
@@ -134,8 +143,8 @@ internal fun OutputPanel(state: CaptureState, engine: CameraEngine) {
     }
     Hint("The camera advertises these fixed rates for the selected size. The library measures average FPS from saved timestamps.")
     Section("Codec & bitrate")
-    Hint("SDR · H.264 MP4 target")
-    Mark("Unavailable", "HEVC, HDR, LOG and RAW capture are outside this SDR recording pipeline.")
+    Hint("${state.profile.label} · MP4 target")
+    Mark("Unavailable", "Genuine sensor LOG and RAW video are not available through this pipeline.")
     KeysRow {
         for (rate in listOf(4, 8, 12, 16, 24, 32)) {
             Key("$rate Mb/s", selected = state.bitrate == rate, enabled = enabled) { engine.configure(bitrate = rate) }
@@ -145,7 +154,7 @@ internal fun OutputPanel(state: CaptureState, engine: CameraEngine) {
     Section("Look output")
     Pipeline.entries.forEach { pipeline ->
         Key(pipeline.label, Modifier.fillMaxWidth(), selected = state.pipeline == pipeline,
-            enabled = enabled) { engine.configure(pipeline = pipeline) }
+            enabled = enabled && (!state.profile.hdr || pipeline == Pipeline.DIRECT)) { engine.configure(pipeline = pipeline) }
     }
     Hint("Clean saves the ungraded video with a look manifest. Baked sends the selected grade to the encoder. Direct bypasses GPU grading.")
     if (state.gpuFailed) Key("Retry color session", enabled = enabled) { engine.configure() }
@@ -401,6 +410,8 @@ internal fun diagnostics(state: CaptureState): JSONObject = JSONObject().apply {
         JSONObject().put("width", it.width).put("height", it.height).put("fixedFpsCandidates", JSONArray(it.rates))
     }))
     put("pipeline", state.pipeline.name)
+    put("recordingProfile", state.profile.name)
+    put("advertisedRecordingProfiles", JSONArray(state.profileFormats.keys.map { it.name }))
     put("sessionOpen", state.ready)
     put("colorPipelineFailed", state.gpuFailed)
     put("thermalStatus", if (Build.VERSION.SDK_INT >= 29) state.thermal else JSONObject.NULL)

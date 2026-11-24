@@ -224,6 +224,8 @@ class Clips(private val context: Context) {
         list().asSequence().filter { it.details.optBoolean("verifiedTracks") }
             .mapNotNull { it.details.optJSONObject("capture") }.firstOrNull {
                 it.optString("cameraId") == lensId && it.optString("pipeline") != "EXPORT" &&
+                    it.optString("dynamicRangeRequested", "SDR") == "SDR" &&
+                    it.optString("videoMimeRequested", "video/avc") == "video/avc" &&
                     it.optInt("recorderError") == 0 && it.optJSONArray("formatDifferences")?.length() == 0
             }
 
