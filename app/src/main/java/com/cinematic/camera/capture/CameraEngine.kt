@@ -236,7 +236,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         }
     }
     private val power = app.getSystemService(PowerManager::class.java)
-    private val monitor = scope.launch {
+    private val thermalMonitorJob = scope.launch {
         while (true) {
             val bytes = withContext(Dispatchers.IO) { freeBytes() }
             val heat = if (Build.VERSION.SDK_INT >= 29) power.currentThermalStatus else 0
@@ -1031,7 +1031,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         remote.close()
         runCatching { audioManager?.unregisterAudioDeviceCallback(audioDevices) }
         stop()
-        monitor.cancel()
+        thermalMonitorJob.cancel()
         camera?.cameraInfo?.cameraState?.removeObservers(owner)
         camera?.cameraInfo?.torchState?.removeObservers(owner)
         provider?.unbindAll()

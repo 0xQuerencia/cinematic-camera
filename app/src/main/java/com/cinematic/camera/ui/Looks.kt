@@ -136,12 +136,12 @@ private fun BalanceEditor(grade: Grade, change: (Grade, Boolean) -> Unit) {
     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         Canvas(Modifier.size(144.dp).pointerInput(zone) {
             detectTapGestures { point ->
-                val radius = size.minDimension * .43f
+                val radius = minOf(size.width, size.height) * .43f
                 apply(Wheel.at((point.x-size.width/2f)/radius, (size.height/2f-point.y)/radius),true)
             }
         }.pointerInput(zone) {
             fun wheel(point: Offset): Wheel {
-                val radius = size.minDimension * .43f
+                val radius = minOf(size.width, size.height) * .43f
                 return Wheel.at((point.x-size.width/2f)/radius,(size.height/2f-point.y)/radius)
             }
             detectDragGestures(onDragStart = { apply(wheel(it),true) }) { event, _ ->
