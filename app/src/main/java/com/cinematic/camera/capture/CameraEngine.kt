@@ -1,4 +1,4 @@
-@file:androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class)
+@file:androidx.annotation.OptIn(androidx.camera.camera2.interop.ExperimentalCamera2Interop::class, androidx.camera.video.ExperimentalMimeTypeApi::class)
 
 package com.cinematic.camera.capture
 
@@ -76,6 +76,13 @@ enum class Pipeline(val label: String) {
     DIRECT("DIRECT / CLEAN FILE"),
 }
 
+enum class VideoProfile(val label: String, val mime: String, val range: DynamicRange) {
+    AVC("H.264 · SDR", "video/avc", DynamicRange.SDR),
+    HEVC("H.265 · SDR", "video/hevc", DynamicRange.SDR),
+    HLG("H.265 · HLG10", "video/hevc", DynamicRange.HLG_10_BIT);
+    val hdr get() = this == HLG
+}
+
 enum class Take { IDLE, STARTING, RECORDING, STOPPING, VERIFYING }
 
 data class Lens(val id: String, val label: String, val facing: Int)
@@ -105,6 +112,8 @@ data class Manual(
 data class CaptureState(
     val lenses: List<Lens> = emptyList(), val lens: Lens? = null,
     val formats: List<Format> = emptyList(), val format: Format? = null,
+    val profile: VideoProfile = VideoProfile.AVC,
+    val profileFormats: Map<VideoProfile, List<Format>> = emptyMap(),
     val fps: Int? = null, val bitrate: Int = 12, val pipeline: Pipeline = Pipeline.DIRECT,
     val stabilization: Boolean = false, val lite: Boolean = false, val audio: Boolean = true,
     val ready: Boolean = false, val gpuFailed: Boolean = false, val busy: Take = Take.IDLE,
@@ -253,7 +262,10 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         val revision = ++lensRevision
         stateFlow.update { it.copy(ready = false) }
         scope.launch {
-            runCatching { withContext(Dispatchers.IO) { formats(info) to if (initial) clips.lastVerifiedFormat(lens.id) else null } }
+            runCatching { withContext(Dispatchers.IO) {
+                VideoProfile.entries.associateWith { profile -> runCatching { formats(info, profile) }.getOrDefault(emptyList()) }
+                    .filterValues { it.isNotEmpty() } to if (initial) clips.lastVerifiedFormat(lens.id) else null
+            } }
                 .onSuccess { (formats, verified) ->
                     if (!disposed && revision == lensRevision) installLens(lens, info, formats, verified, initial)
                 }.onFailure {
@@ -262,8 +274,12 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         }
     }
 
-    private fun installLens(lens: Lens, info: CameraInfo, formats: List<Format>,
+    private fun installLens(lens: Lens, info: CameraInfo, profiles: Map<VideoProfile, List<Format>>,
                             verified: JSONObject?, initial: Boolean) {
+        val oldProfile = state.value.profile
+        val profile = oldProfile.takeIf { it in profiles } ?: VideoProfile.AVC.takeIf { it in profiles }
+            ?: profiles.keys.firstOrNull() ?: VideoProfile.AVC
+        val formats = profiles[profile].orEmpty()
         val format = verified?.optString("requestedResolution")?.let { label -> formats.firstOrNull { it.label == label } }
             ?: formats.firstOrNull { it.quality == state.value.format?.quality } ?: formats.firstOrNull()
         val previousRate = verified?.optInt("requestedFps")?.takeIf { it > 0 } ?: state.value.fps
@@ -275,9 +291,12 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
             if (!initial && format?.quality != old.format?.quality) add("resolution")
             if (!initial && fps != old.fps) add("frame rate")
             if (!initial && old.stabilization) add("stabilization")
+            if (!initial && oldProfile != profile) add("codec / range")
         }
         stateFlow.update {
             it.copy(lens = lens, formats = formats, format = format, fps = fps, bitrate = bitrate, ready = false,
+                profile = profile, profileFormats = profiles,
+                pipeline = if (profile.hdr) Pipeline.DIRECT else it.pipeline,
                 controls = capabilities(info), rawPhoto = false, manual = Manual(), sensor = Sensor(), stabilization = false,
                 ev = 0, zoom = 1f, message = if (changes.isEmpty()) null else "Lens switch changed ${changes.joinToString()} for the next take.")
         }
@@ -307,10 +326,29 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         bind()
     }
 
+    fun selectVideoProfile(profile: VideoProfile) {
+        val current = state.value
+        if (current.active || current.photoMode || current.profile == profile) return
+        val choices = current.profileFormats[profile].orEmpty()
+        if (choices.isEmpty()) { tell("This lens does not advertise ${profile.label}."); return }
+        val format = choices.firstOrNull { it.quality == current.format?.quality } ?: choices.first()
+        val rate = current.fps?.takeIf { it in format.rates }
+        stateFlow.update { it.copy(profile = profile, formats = choices, format = format, fps = rate,
+            pipeline = if (profile.hdr) Pipeline.DIRECT else it.pipeline,
+            stabilization = false, manual = Manual(), ev = 0, zoom = 1f, ready = false,
+            message = "Selected ${profile.label}." + (if (profile.hdr) " SDR looks disabled." else "") +
+                (if (current.fps != rate) " Frame rate changed to Auto." else "")) }
+        bind()
+    }
+
     fun configure(format: Format? = state.value.format, fps: Int? = state.value.fps,
                   bitrate: Int = state.value.bitrate, pipeline: Pipeline = state.value.pipeline,
                   stabilization: Boolean = state.value.stabilization) {
         val old = state.value
+        if (old.profile.hdr && pipeline != Pipeline.DIRECT) {
+            tell("Switch to SDR before using the SDR look pipeline.")
+            return
+        }
         if (old.active || old.photoMode || (fps != null && fps !in format?.rates.orEmpty()) ||
             (format != null && format !in old.formats) || bitrate !in 4..32 ||
             (stabilization && !old.controls.eis)) return
@@ -401,6 +439,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         try {
             val rotation = view.display?.rotation ?: Surface.ROTATION_0
             val previewBuilder = Preview.Builder().setTargetRotation(rotation)
+            if (!configuration.photoMode) previewBuilder.setDynamicRange(configuration.profile.range)
             configuration.format?.let { format ->
                 val aspect = if (format.width * 9 == format.height * 16)
                     AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY
@@ -454,8 +493,9 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
                 .build().also { group.addUseCase(it) } else null
             val capture = configuration.format?.takeUnless { configuration.photoMode }?.let { format ->
                 val recorder = Recorder.Builder().setQualitySelector(QualitySelector.from(format.quality))
+                    .setVideoMimeType(configuration.profile.mime)
                     .setTargetVideoEncodingBitRate(configuration.bitrate * 1_000_000).build()
-                VideoCapture.Builder(recorder).setDynamicRange(DynamicRange.SDR)
+                VideoCapture.Builder(recorder).setDynamicRange(configuration.profile.range)
                     .setTargetRotation(rotation).setVideoStabilizationEnabled(configuration.stabilization)
                     .apply { configuration.fps?.let { setTargetFrameRate(Range(it, it)) } }.build()
                     .also { group.addUseCase(it) }
@@ -543,7 +583,8 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
             put("exposureNsAtStartRequest", current.sensor.shutter)
             put("focusDioptersAtStartRequest", current.sensor.focus)
             put("awbModeAtStartRequest", current.sensor.awb)
-            put("dynamicRangeRequested", "SDR")
+            put("dynamicRangeRequested", if (current.profile.hdr) "HLG10" else "SDR")
+            put("videoMimeRequested", current.profile.mime)
             put("shot", current.shot.json())
             put("gyroRequested", current.gyroEnabled)
             if (current.pipeline != Pipeline.DIRECT) put("look", selectedGrade.toJson())
@@ -601,7 +642,10 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
                                         Log.w("CinematicCamera", "Could not inspect $uri", it)
                                     }.getOrNull()
                                     val differences = if (measured == null) emptyList() else buildList {
-                                        if (measured.optString("videoMime") != "video/avc") add("codec")
+                                        if (measured.optString("videoMime") != current.profile.mime) add("codec")
+                                        val transfer = measured.optInt(android.media.MediaFormat.KEY_COLOR_TRANSFER, -1)
+                                        if (current.profile.hdr && transfer != android.media.MediaFormat.COLOR_TRANSFER_HLG) add("HLG transfer")
+                                        if (!current.profile.hdr && transfer in listOf(android.media.MediaFormat.COLOR_TRANSFER_HLG, android.media.MediaFormat.COLOR_TRANSFER_ST2084)) add("dynamic range")
                                         current.format?.let { format ->
                                             val width = measured.optInt("width")
                                             val height = measured.optInt("height")
@@ -825,12 +869,16 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
     private fun freeBytes() = runCatching { StatFs(Environment.getExternalStorageDirectory().path).availableBytes }
         .getOrDefault(0L)
 
-    private fun formats(info: CameraInfo): List<Format> {
-        val qualities = Recorder.getVideoCapabilities(info).getSupportedQualities(DynamicRange.SDR)
+    private fun formats(info: CameraInfo, profile: VideoProfile): List<Format> {
+        if (profile.hdr && Build.VERSION.SDK_INT < 33) return emptyList()
+        if (profile.mime !in Recorder.getSupportedVideoMimeTypes()) return emptyList()
+        val capabilities = Recorder.getVideoCapabilities(info, profile.mime) ?: return emptyList()
+        if (profile.range !in capabilities.supportedDynamicRanges) return emptyList()
+        val qualities = capabilities.getSupportedQualities(profile.range)
         val characteristics = Camera2CameraInfo.from(info)
         val streams = characteristics.getCameraCharacteristic(Keys.SCALER_STREAM_CONFIGURATION_MAP)
         val encoders = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter { it.isEncoder }
-            .mapNotNull { runCatching { it.getCapabilitiesForType("video/avc").videoCapabilities }.getOrNull() }
+            .mapNotNull { runCatching { it.getCapabilitiesForType(profile.mime).videoCapabilities }.getOrNull() }
         return listOf(Quality.FHD, Quality.HD, Quality.SD, Quality.UHD).filter { it in qualities }
             .mapNotNull { quality ->
                 val size = QualitySelector.getResolution(info, quality) ?: return@mapNotNull null

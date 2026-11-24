@@ -42,6 +42,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.cinematic.camera.capture.CameraEngine
 import com.cinematic.camera.capture.CaptureState
 import com.cinematic.camera.capture.Pipeline
+import com.cinematic.camera.capture.VideoProfile
 import com.cinematic.camera.capture.Take
 import com.cinematic.camera.color.Cube
 import com.cinematic.camera.color.AutoLookSelector
@@ -162,6 +163,7 @@ fun CameraApp(engine: CameraEngine) {
     }
     fun edit(value: Grade, checkpoint: Boolean = true) {
         if (state.active) return
+        if (engine.state.value.profile.hdr) { engine.tell("Select SDR in Output before editing looks."); return }
         if (checkpoint && grade != value) {
             history = (history.takeLast(39) + grade)
             undone = emptyList()
@@ -171,6 +173,7 @@ fun CameraApp(engine: CameraEngine) {
     }
     fun openColorist() {
         if (state.active) return
+        if (state.profile.hdr) { engine.tell("Select SDR in Output before using the colorist."); drawer = Drawer.OUTPUT; return }
         if (state.photoMode) engine.photoMode(false)
         if (engine.state.value.pipeline == Pipeline.DIRECT) engine.configure(pipeline = Pipeline.CLEAN)
         lab = false
@@ -221,12 +224,14 @@ fun CameraApp(engine: CameraEngine) {
     }
     fun toggleAutoLook() {
         if (state.active || state.photoMode) return
+        if (state.profile.hdr) { engine.tell("Auto Look requires SDR."); drawer = Drawer.OUTPUT; return }
         autoLook = !autoLook
         autoReason = if (autoLook) "Analyzing scene color and light…" else null
         autoPicker.reset()
         if (autoLook && state.pipeline == Pipeline.DIRECT) engine.configure(pipeline = Pipeline.CLEAN)
     }
     fun choose(value: Look) {
+        if (state.profile.hdr) { engine.tell("Select SDR before applying a look."); drawer = Drawer.OUTPUT; return }
         if (state.photoMode) engine.photoMode(false)
         autoLook = false
         autoReason = null
@@ -323,6 +328,7 @@ fun CameraApp(engine: CameraEngine) {
         else recordPermissions.launch(permissions.toTypedArray())
     }
     fun applySaved(item: SavedLook) {
+        if (state.profile.hdr) { engine.tell("Select SDR before applying a video look preset."); drawer = Drawer.OUTPUT; return }
         if (state.photoMode) engine.photoMode(false)
         autoLook = false
         autoReason = null
@@ -356,6 +362,7 @@ fun CameraApp(engine: CameraEngine) {
     }
 
     fun quickPreset(choice: StoryPreset) {
+        if (state.profile.hdr) { engine.tell("Select SDR before applying a video look preset."); drawer = Drawer.OUTPUT; return }
         if (state.photoMode) engine.photoMode(false)
         autoLook = false
         autoReason = null
@@ -372,6 +379,7 @@ fun CameraApp(engine: CameraEngine) {
     }
 
     val autoStatus = if (autoLook) when {
+        state.profile.hdr -> "Auto Look paused · HLG capture"
         state.pipeline == Pipeline.DIRECT -> "Auto Look paused · Direct capture"
         state.active -> "Auto Look locked · ${grade.look.name}"
         else -> "Auto Look · ${grade.look.name} · ${autoReason ?: "Analyzing scene…"}"
@@ -428,6 +436,7 @@ fun CameraApp(engine: CameraEngine) {
                 }
                 LibraryNav(panel, onCamera = { drawer = null; lab = false },
                     onLab = {
+                        if (state.profile.hdr) { engine.tell("Select SDR to open Look Lab."); drawer = Drawer.OUTPUT; return@LibraryNav }
                         if (state.photoMode) engine.photoMode(false)
                         drawer = null
                         if (state.pipeline == Pipeline.DIRECT) engine.configure(pipeline = Pipeline.CLEAN)
@@ -470,13 +479,13 @@ fun CameraApp(engine: CameraEngine) {
                         }
                         Telemetry("RES", if (state.photoMode) (if (state.rawPhoto) "DNG" else "JPEG") else state.format?.label ?: "—", !state.active) { drawer = Drawer.OUTPUT }
                         Telemetry("FPS", if (state.photoMode) "Still" else state.fps?.let { "$it target" } ?: "Auto", !state.active && !state.photoMode) { drawer = Drawer.OUTPUT }
-                        Telemetry("CODEC", if (state.photoMode) (if (state.rawPhoto) "RAW" else "JPEG") else "AVC target", !state.active) { drawer = Drawer.OUTPUT }
+                        Telemetry("CODEC", if (state.photoMode) (if (state.rawPhoto) "RAW" else "JPEG") else state.profile.label, !state.active) { drawer = Drawer.OUTPUT }
                         Telemetry("LUT", if (state.photoMode) "Off" else grade.look.name, !state.active && !state.photoMode) { drawer = Drawer.LOOKS }
                         Telemetry("LENS", state.lens?.label ?: "—", !state.active) { drawer = Drawer.LENS }
                         Telemetry("STAB", if (state.stabilization && !state.photoMode) "On" else "Off", !state.active && !state.photoMode) { drawer = Drawer.OUTPUT }
                         if (landscape) {
                             ModeSwitch(pro, !state.active, ::selectMode)
-                            Key("Auto Look", selected = autoLook, enabled = !state.active && !state.photoMode, action = ::toggleAutoLook)
+                            Key("Auto Look", selected = autoLook, enabled = !state.active && !state.photoMode && !state.profile.hdr, action = ::toggleAutoLook)
                         }
                     }
                 }
@@ -490,7 +499,7 @@ fun CameraApp(engine: CameraEngine) {
                         if (!lab) Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             IconKey(ToolIcon.SCOPE, "Monitoring", selected = instrument != ScopeMode.OFF) { drawer = Drawer.MONITOR }
                             IconKey(ToolIcon.GRID, "Frame guides", selected = guide != "Off") { drawer = Drawer.MONITOR }
-                            IconKey(ToolIcon.LOOK, "Look Lab", enabled = !state.active && !state.photoMode) {
+                            IconKey(ToolIcon.LOOK, "Look Lab", enabled = !state.active && !state.photoMode && !state.profile.hdr) {
                                 if (state.pipeline == Pipeline.DIRECT) engine.configure(pipeline = Pipeline.CLEAN)
                                 lab = true
                             }
@@ -525,7 +534,7 @@ fun CameraApp(engine: CameraEngine) {
                     CaptureStatus(state, notice ?: autoStatus)
                     if (!pro && !state.photoMode) LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         item {
-                            Key("Auto Look", selected = autoLook, enabled = !state.active && !state.photoMode, action = ::toggleAutoLook)
+                            Key("Auto Look", selected = autoLook, enabled = !state.active && !state.photoMode && !state.profile.hdr, action = ::toggleAutoLook)
                             Key("Looks", enabled = !state.active) { drawer = Drawer.LOOKS }
                         }
                         items(originalLooks, key = { it.name }) { look ->
@@ -538,7 +547,7 @@ fun CameraApp(engine: CameraEngine) {
                     }
                     if (!landscape && !state.photoMode) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Key("Auto Look", selected = autoLook, enabled = !state.active && !state.photoMode, action = ::toggleAutoLook)
+                        Key("Auto Look", selected = autoLook, enabled = !state.active && !state.photoMode && !state.profile.hdr, action = ::toggleAutoLook)
                         Key(grade.look.name, enabled = !state.active) { drawer = Drawer.LOOKS }
                         Key("Colorist", enabled = !state.active, action = ::openColorist)
                         Key("Look Lab", enabled = !state.active) {
@@ -610,7 +619,7 @@ fun CameraApp(engine: CameraEngine) {
                         Key(if (state.photoMode) "Photo format" else "Recording format", Modifier.fillMaxWidth()) { drawer = Drawer.OUTPUT }
                         Key("Microphone", Modifier.fillMaxWidth()) { drawer = Drawer.AUDIO }
                         Key("Production & motion", Modifier.fillMaxWidth(), enabled = !state.active) { drawer = Drawer.PRODUCTION }
-                        Key("Auto Look & colorist", Modifier.fillMaxWidth(), enabled = !state.active, action = ::openColorist)
+                        Key("Auto Look & colorist", Modifier.fillMaxWidth(), enabled = !state.active && !state.profile.hdr, action = ::openColorist)
                         ToggleRow("Left-handed landscape", left, !state.active) {
                             scope.launch { context.preferences.edit { prefs -> prefs[leftKey] = it } }
                         }

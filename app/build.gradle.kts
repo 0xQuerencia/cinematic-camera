@@ -32,7 +32,7 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("androidx.media3:media3-transformer:1.8.0")
     listOf("core", "camera2", "lifecycle", "video", "view").forEach {
-        implementation("androidx.camera:camera-$it:1.5.3")
+        implementation("androidx.camera:camera-$it:1.7.0")
     }
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
