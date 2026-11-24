@@ -36,6 +36,9 @@ class ColorProcessor(
     @Volatile var lite = false
     @Volatile var scopeEnabled = false
     @Volatile var autoSampleEnabled = false
+    @Volatile var monitor = 0
+    @Volatile var zebra = .95f
+    @Volatile var edgeSensitivity = .5f
 
     private var display = EGL.EGL_NO_DISPLAY
     private var context = EGL.EGL_NO_CONTEXT
@@ -159,7 +162,8 @@ class ColorProcessor(
             makeCurrent(window)
             output.updateTransformMatrix(transform, cameraTransform)
             GL.glViewport(0, 0, output.size.width, output.size.height)
-            shader.draw(transform, !compare, split)
+            val previewOnly = output.targets == CameraEffect.PREVIEW
+            shader.draw(transform, !compare, split, if (previewOnly) monitor else 0, zebra, edgeSensitivity)
             EGLExt.eglPresentationTimeANDROID(display, window, input.timestamp)
             check(EGL.eglSwapBuffers(display, window)) { "GPU output swap failed." }
         }

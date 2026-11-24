@@ -17,7 +17,7 @@ import kotlin.math.abs
 
 internal enum class ScopeMode(val label: String) {
     OFF("Off"), HISTOGRAM("Histogram"), WAVEFORM("Waveform"), RGB_PARADE("RGB parade"), VECTORSCOPE("Vectorscope"),
-    ZEBRA("Luma clipping map"), PEAKING("Edge map"), FALSE_COLOR("False color map"),
+    ZEBRA("Zebras"), PEAKING("Focus peaking"), FALSE_COLOR("False color"),
 }
 
 @Composable

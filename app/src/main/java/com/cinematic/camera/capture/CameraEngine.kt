@@ -159,6 +159,9 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
     private val scopeFrames = MutableStateFlow<ByteArray?>(null)
     val scopeSamples = scopeFrames.asStateFlow()
     private var scopes = false
+    private var monitor = 0
+    private var zebraThreshold = .95f
+    private var edgeThreshold = .5f
     private var autoLookSamples = false
     val clips = Clips(app)
     private var view: PreviewView? = null
@@ -399,6 +402,17 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         if (!state.value.active) stateFlow.update { it.copy(audio = enabled) }
     }
 
+    fun monitoringOverlay(mode: Int, zebra: Float, edge: Float) {
+        monitor = mode.coerceIn(0,3)
+        zebraThreshold = zebra.coerceIn(.7f,1f)
+        edgeThreshold = edge.coerceIn(0f,1f)
+        processor?.apply {
+            this.monitor = this@CameraEngine.monitor
+            this.zebra = zebraThreshold
+            this.edgeSensitivity = edgeThreshold
+        }
+    }
+
     fun scopes(enabled: Boolean) {
         scopes = enabled
         processor?.scopeEnabled = enabled
@@ -552,6 +566,9 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
                 effect.lite = configuration.lite
                 effect.scopeEnabled = scopes
                 effect.autoSampleEnabled = autoLookSamples
+                effect.monitor = monitor
+                effect.zebra = zebraThreshold
+                effect.edgeSensitivity = edgeThreshold
                 processor = effect
                 group.addEffect(effect.effect)
             }

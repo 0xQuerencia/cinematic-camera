@@ -142,14 +142,15 @@ internal fun SimpleCapture(
 }
 
 @Composable
-internal fun ExposureStrip(state: CaptureState, open: (Drawer) -> Unit) {
+internal fun ExposureStrip(state: CaptureState, hidden: Set<String> = emptySet(), open: (Drawer) -> Unit) {
+    if (listOf("ISO","SHUTTER","WB","FOCUS","EV").all { it in hidden }) return
     Row(Modifier.fillMaxWidth().clip(InstrumentShape).background(Panel)
         .horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
-        Telemetry("ISO", state.sensor.iso?.toString() ?: "—", emphasized = true) { open(Drawer.EXPOSURE) }
-        Telemetry("SHUTTER", state.sensor.shutter.shutterLabel(), emphasized = true) { open(Drawer.EXPOSURE) }
-        Telemetry("WB", wbLabel(state.sensor.awb), emphasized = true) { open(Drawer.WB) }
-        Telemetry("FOCUS", state.sensor.focus?.let { "%.2f D".format(it) } ?: "—", emphasized = true) { open(Drawer.FOCUS) }
-        Telemetry("EV", state.controls.ev?.let { "%+.1f".format(state.ev * state.controls.evStep) } ?: "—",
+        if ("ISO" !in hidden) Telemetry("ISO", state.sensor.iso?.toString() ?: "—", emphasized = true) { open(Drawer.EXPOSURE) }
+        if ("SHUTTER" !in hidden) Telemetry("SHUTTER", state.sensor.shutter.shutterLabel(), emphasized = true) { open(Drawer.EXPOSURE) }
+        if ("WB" !in hidden) Telemetry("WB", wbLabel(state.sensor.awb), emphasized = true) { open(Drawer.WB) }
+        if ("FOCUS" !in hidden) Telemetry("FOCUS", state.sensor.focus?.let { "%.2f D".format(it) } ?: "—", emphasized = true) { open(Drawer.FOCUS) }
+        if ("EV" !in hidden) Telemetry("EV", state.controls.ev?.let { "%+.1f".format(state.ev * state.controls.evStep) } ?: "—",
             emphasized = true) { open(Drawer.EXPOSURE) }
     }
 }

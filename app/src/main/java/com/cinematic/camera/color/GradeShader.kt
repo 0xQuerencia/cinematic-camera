@@ -93,10 +93,12 @@ internal class GradeShader(private val inputTarget: Int) : AutoCloseable {
         GL.glUniform1i(location("lite"), if (lite) 1 else 0)
     }
 
-    fun draw(transform: FloatArray, enabled: Boolean, split: Boolean) {
+    fun draw(transform: FloatArray, enabled: Boolean, split: Boolean, monitor: Int = 0, zebra: Float = .95f, edgeSensitivity: Float = .5f) {
         GL.glUniformMatrix4fv(location("transform"), 1, false, transform, 0)
         GL.glUniform1i(location("gradeEnabled"), if (enabled) 1 else 0)
         GL.glUniform1i(location("split"), if (split) 1 else 0)
+        GL.glUniform1i(location("monitor"), monitor)
+        GL.glUniform2f(location("monitorSettings"), zebra, edgeSensitivity)
         GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
     }
 
@@ -169,6 +171,8 @@ private val fragmentShader = """
     uniform int gradeEnabled;
     uniform int split;
     uniform int lite;
+    uniform int monitor;
+    uniform vec2 monitorSettings;
     in vec2 uv;
     in vec2 frame;
     out vec4 outputColor;
@@ -220,10 +224,30 @@ private val fragmentShader = """
         hsl.z = clamp(hsl.z+change.z*smoothstep(0.0,.15,hsl.y),0.0,1.0);
         return fromHsl(hsl);
     }
+    vec3 monitorColor(vec3 source, vec3 rgb) {
+        if (monitor == 0) return rgb;
+        float y = dot(source,luma);
+        if (monitor == 1) {
+            if (y >= monitorSettings.x && mod(floor((gl_FragCoord.x+gl_FragCoord.y)/5.0),2.0)<1.0)
+                return mix(rgb,vec3(1.0,.73,.18),.88);
+        } else if (monitor == 2) {
+            vec2 dx = dFdx(uv), dy = dFdy(uv);
+            float edgeAmount = abs(dot(texture(camera,uv+dx*2.0).rgb,luma)-y)
+                + abs(dot(texture(camera,uv+dy*2.0).rgb,luma)-y);
+            if (edgeAmount > mix(.28,.025,monitorSettings.y)) return mix(rgb,vec3(.15,1.0,.42),.85);
+        } else if (monitor == 3) {
+            if (y >= .94) return vec3(.98,.15,.1);
+            if (y >= .76) return vec3(1.0,.76,.2);
+            if (y >= .39 && y <= .5) return vec3(.2,.8,.42);
+            if (y < .12) return vec3(.19,.38,.9);
+            return vec3(y);
+        }
+        return rgb;
+    }
     void main() {
         vec3 source = texture(camera, uv).rgb;
         if (gradeEnabled == 0 || (split == 1 && frame.x < .5)) {
-            outputColor = vec4(source, 1.0);
+            outputColor = vec4(monitorColor(source,source), 1.0);
             return;
         }
         vec3 rgb = source * exp2(light.x);
@@ -278,6 +302,6 @@ private val fragmentShader = """
             rgb += noise * film.x * .12 * (1.0 - .65 * dot(source, luma));
         }
         rgb *= 1.0 - film.y * smoothstep(.22, .72, length(frame - .5));
-        outputColor = vec4(clamp(rgb, 0.0, 1.0), 1.0);
+        outputColor = vec4(clamp(monitorColor(source,rgb), 0.0, 1.0), 1.0);
     }
 """.trimIndent()
