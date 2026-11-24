@@ -18,7 +18,9 @@ class ColorIntegrationTest {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val storage = LookStorage(context)
         val grade = Grade(look = originalLooks[6], strength = .37f, exposure = .25f, grain = .1f,
-            curves = RgbCurves(red = ToneCurve(.15f, .4f, .85f)), skinProtection = .65f)
+            curves = RgbCurves(red = ToneCurve(.15f, .4f, .85f)), skinProtection = .65f,
+            balance = ColorBalance(shadows = Wheel(.2f, -.1f)),
+            hsl = SelectiveHsl(List(6) { if (it == 2) HueBand(.1f, -.2f, .15f) else HueBand() }), diffusion = .3f)
         val initial = SavedLook("round-trip", "Test grade", grade, JSONObject().put("fps", 30))
         val decoded = storage.decode(initial.id, storage.encode(initial))
         assertEquals(initial.name, decoded.name)
@@ -27,11 +29,17 @@ class ColorIntegrationTest {
         assertEquals(.25f, decoded.grade.exposure, .00001f)
         assertEquals(grade.curves, decoded.grade.curves)
         assertEquals(.65f, decoded.grade.skinProtection, .00001f)
+        assertEquals(grade.balance, decoded.grade.balance)
+        assertEquals(grade.hsl, decoded.grade.hsl)
+        assertEquals(.3f, decoded.grade.diffusion, .00001f)
         val legacy = JSONObject(storage.encode(initial))
-        legacy.getJSONObject("grade").apply { remove("curves"); remove("skinProtection") }
+        legacy.getJSONObject("grade").apply { remove("curves"); remove("skinProtection"); remove("balance"); remove("hsl"); remove("diffusion") }
         val legacyGrade = storage.decode(initial.id, legacy.toString()).grade
         assertEquals(RgbCurves(), legacyGrade.curves)
         assertEquals(0f, legacyGrade.skinProtection, .00001f)
+        assertEquals(ColorBalance(), legacyGrade.balance)
+        assertEquals(SelectiveHsl(), legacyGrade.hsl)
+        assertEquals(0f, legacyGrade.diffusion, .00001f)
         val expected = requireNotNull(grade.look.cube).sample(.14f, .43f, .89f)
         assertArrayEquals(expected, requireNotNull(decoded.grade.look.cube).sample(.14f, .43f, .89f), .00001f)
         assertThrows(IllegalArgumentException::class.java) {
