@@ -26,6 +26,10 @@ fun Grade.toJson(embedCube: Boolean = false) = JSONObject().apply {
     put("bloom", bloom.toDouble())
     put("halation", halation.toDouble())
     put("skinProtection", skinProtection.toDouble())
+    put("diffusion", diffusion.toDouble())
+    put("balance", org.json.JSONArray(listOf(balance.shadows,balance.midtones,balance.highlights).map {
+        org.json.JSONArray(listOf(it.x.toDouble(),it.y.toDouble())) }))
+    put("hsl", org.json.JSONArray(hsl.bands.map { org.json.JSONArray(listOf(it.hue.toDouble(),it.saturation.toDouble(),it.lightness.toDouble())) }))
     put("curves", JSONObject().apply {
         fun encode(curve: ToneCurve) = org.json.JSONArray(listOf(
             curve.low.toDouble(), curve.mid.toDouble(), curve.high.toDouble()))
@@ -93,10 +97,28 @@ class LookStorage(context: Context) {
         val curves = RgbCurves(decodeCurve("master"), decodeCurve("red"),
             decodeCurve("green"), decodeCurve("blue"))
         val skinProtection = if (grade.has("skinProtection")) read("skinProtection", 0f..1f) else 0f
+        val wheels = grade.optJSONArray("balance")?.let { values ->
+            require(values.length() == 3)
+            fun wheel(i: Int): Wheel {
+                val pair = values.getJSONArray(i)
+                require(pair.length() == 2)
+                return Wheel(pair.getDouble(0).toFloat(), pair.getDouble(1).toFloat())
+            }
+            ColorBalance(wheel(0), wheel(1), wheel(2))
+        } ?: ColorBalance()
+        val hsl = grade.optJSONArray("hsl")?.let { values ->
+            require(values.length() == 6)
+            SelectiveHsl(List(6) { i ->
+                val band = values.getJSONArray(i)
+                require(band.length() == 3)
+                HueBand(band.getDouble(0).toFloat(), band.getDouble(1).toFloat(), band.getDouble(2).toFloat())
+            })
+        } ?: SelectiveHsl()
+        val diffusion = if (grade.has("diffusion")) read("diffusion",0f..1f) else 0f
         val result = Grade(look, read("strength", 0f..1f), read("exposure", -2f..2f),
             read("contrast", .5f..1.5f), read("saturation", 0f..2f), read("temperature", -.3f.. .3f),
             read("tint", -.3f.. .3f), read("curve", .5f..2f), read("highlights", 0f.. .4f),
-            read("grain", 0f..1f), read("vignette", 0f..1f), read("bloom", 0f..1f), read("halation", 0f..1f), curves, skinProtection)
+            read("grain", 0f..1f), read("vignette", 0f..1f), read("bloom", 0f..1f), read("halation", 0f..1f), curves, skinProtection, wheels, hsl, diffusion)
         return SavedLook(id, name, result, document.optJSONObject("capture"))
     }
 }

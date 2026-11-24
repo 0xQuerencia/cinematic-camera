@@ -83,14 +83,22 @@ internal class GradeShader(private val inputTarget: Int) : AutoCloseable {
         GL.glUniform3fv(location("greenCurve"), 1, value.curves.green.values(), 0)
         GL.glUniform3fv(location("blueCurve"), 1, value.curves.blue.values(), 0)
         GL.glUniform1f(location("skinProtection"), value.skinProtection)
+        GL.glUniform2f(location("shadowWheel"), value.balance.shadows.x, value.balance.shadows.y)
+        GL.glUniform2f(location("midWheel"), value.balance.midtones.x, value.balance.midtones.y)
+        GL.glUniform2f(location("highlightWheel"), value.balance.highlights.x, value.balance.highlights.y)
+        GL.glUniform1i(location("hslEnabled"), if (value.hsl == SelectiveHsl()) 0 else 1)
+        GL.glUniform3fv(location("hslBands[0]"), 6, value.hsl.uniforms(), 0)
+        GL.glUniform1f(location("diffusion"), value.diffusion)
         GL.glUniform1f(location("seed"), seed)
         GL.glUniform1i(location("lite"), if (lite) 1 else 0)
     }
 
-    fun draw(transform: FloatArray, enabled: Boolean, split: Boolean) {
+    fun draw(transform: FloatArray, enabled: Boolean, split: Boolean, monitor: Int = 0, zebra: Float = .95f, edgeSensitivity: Float = .5f) {
         GL.glUniformMatrix4fv(location("transform"), 1, false, transform, 0)
         GL.glUniform1i(location("gradeEnabled"), if (enabled) 1 else 0)
         GL.glUniform1i(location("split"), if (split) 1 else 0)
+        GL.glUniform1i(location("monitor"), monitor)
+        GL.glUniform2f(location("monitorSettings"), zebra, edgeSensitivity)
         GL.glDrawArrays(GL.GL_TRIANGLE_STRIP, 0, 4)
     }
 
@@ -152,11 +160,19 @@ private val fragmentShader = """
     uniform vec3 greenCurve;
     uniform vec3 blueCurve;
     uniform float skinProtection;
+    uniform vec2 shadowWheel;
+    uniform vec2 midWheel;
+    uniform vec2 highlightWheel;
+    uniform vec3 hslBands[6];
+    uniform int hslEnabled;
+    uniform float diffusion;
     uniform float edge;
     uniform float seed;
     uniform int gradeEnabled;
     uniform int split;
     uniform int lite;
+    uniform int monitor;
+    uniform vec2 monitorSettings;
     in vec2 uv;
     in vec2 frame;
     out vec4 outputColor;
@@ -176,10 +192,62 @@ private val fragmentShader = """
             * smoothstep(.10, .30, hue) * (1.0 - smoothstep(.70, .90, hue))
             * smoothstep(.05, .20, y) * (1.0 - smoothstep(.82, .98, y));
     }
+    vec3 colorOffset(vec2 wheel) {
+        vec3 v = vec3(wheel.x, -.5*wheel.x + .8660254*wheel.y, -.5*wheel.x - .8660254*wheel.y);
+        return v - vec3(dot(v, luma));
+    }
+    vec3 toHsl(vec3 c) {
+        float hi = max(c.r, max(c.g, c.b));
+        float lo = min(c.r, min(c.g, c.b));
+        float d = hi-lo, l = (hi+lo)*.5;
+        if (d < .0001) return vec3(0.0,0.0,l);
+        float h = hi == c.r ? (c.g-c.b)/d : hi == c.g ? (c.b-c.r)/d+2.0 : (c.r-c.g)/d+4.0;
+        return vec3(fract(h/6.0), d/max(1.0-abs(2.0*l-1.0),.0001),l);
+    }
+    vec3 fromHsl(vec3 hsl) {
+        vec3 shape = clamp(abs(fract(hsl.x + vec3(0.0,2.0/3.0,1.0/3.0))*6.0-3.0)-1.0,0.0,1.0);
+        float chroma = (1.0-abs(2.0*hsl.z-1.0))*hsl.y;
+        return (shape-.5)*chroma + hsl.z;
+    }
+    vec3 selective(vec3 rgb) {
+        vec3 hsl = toHsl(clamp(rgb,0.0,1.0));
+        if (hsl.y < .001) return rgb;
+        vec3 change = vec3(0.0);
+        for (int i=0; i<6; ++i) {
+            float distance = abs(hsl.x-float(i)/6.0);
+            distance = min(distance,1.0-distance);
+            float weight = max(0.0,1.0-distance*6.0);
+            change += hslBands[i]*weight;
+        }
+        hsl.x = fract(hsl.x+change.x);
+        hsl.y = clamp(hsl.y*(1.0+change.y),0.0,1.0);
+        hsl.z = clamp(hsl.z+change.z*smoothstep(0.0,.15,hsl.y),0.0,1.0);
+        return fromHsl(hsl);
+    }
+    vec3 monitorColor(vec3 source, vec3 rgb) {
+        if (monitor == 0) return rgb;
+        float y = dot(source,luma);
+        if (monitor == 1) {
+            if (y >= monitorSettings.x && mod(floor((gl_FragCoord.x+gl_FragCoord.y)/5.0),2.0)<1.0)
+                return mix(rgb,vec3(1.0,.73,.18),.88);
+        } else if (monitor == 2) {
+            vec2 dx = dFdx(uv), dy = dFdy(uv);
+            float edgeAmount = abs(dot(texture(camera,uv+dx*2.0).rgb,luma)-y)
+                + abs(dot(texture(camera,uv+dy*2.0).rgb,luma)-y);
+            if (edgeAmount > mix(.28,.025,monitorSettings.y)) return mix(rgb,vec3(.15,1.0,.42),.85);
+        } else if (monitor == 3) {
+            if (y >= .94) return vec3(.98,.15,.1);
+            if (y >= .76) return vec3(1.0,.76,.2);
+            if (y >= .39 && y <= .5) return vec3(.2,.8,.42);
+            if (y < .12) return vec3(.19,.38,.9);
+            return vec3(y);
+        }
+        return rgb;
+    }
     void main() {
         vec3 source = texture(camera, uv).rgb;
         if (gradeEnabled == 0 || (split == 1 && frame.x < .5)) {
-            outputColor = vec4(source, 1.0);
+            outputColor = vec4(monitorColor(source,source), 1.0);
             return;
         }
         vec3 rgb = source * exp2(light.x);
@@ -202,6 +270,13 @@ private val fragmentShader = """
                        curveAt(curveAt(rgb.g, masterCurve), greenCurve),
                        curveAt(curveAt(rgb.b, masterCurve), blueCurve));
         }
+        if (dot(abs(shadowWheel)+abs(midWheel)+abs(highlightWheel),vec2(1.0)) > 0.0) {
+            float y = clamp(dot(rgb,luma),0.0,1.0);
+            rgb += .12 * (colorOffset(shadowWheel)*(1.0-smoothstep(.12,.58,y)) +
+                colorOffset(midWheel)*(1.0-abs(2.0*y-1.0)) +
+                colorOffset(highlightWheel)*smoothstep(.42,.9,y));
+        }
+        if (hslEnabled == 1) rgb = selective(rgb);
         if (skinProtection > 0.0) {
             vec3 restored = vec3(dot(rgb, luma)) + preLook - vec3(dot(preLook, luma));
             rgb = mix(rgb, restored, skinProtection * warmMask(source));
@@ -214,11 +289,19 @@ private val fragmentShader = """
             }
             rgb += glow * (.35 * film.z + vec3(1.0, .24, .08) * .45 * film.w);
         }
+        if (lite == 0 && diffusion > 0.0) {
+            vec3 diffuse = vec3(0.0);
+            for (int i=0; i<4; ++i) {
+                vec2 dir = vec2(float(i & 1)*2.0-1.0,float(i >> 1)*2.0-1.0);
+                diffuse += texture(camera,uv+dir*.0018).rgb;
+            }
+            rgb += (diffuse*.25-source)*diffusion*.35;
+        }
         if (film.x > 0.0) {
             float noise = fract(sin(dot(floor(gl_FragCoord.xy) + seed, vec2(12.9898, 78.233))) * 43758.5453) - .5;
             rgb += noise * film.x * .12 * (1.0 - .65 * dot(source, luma));
         }
         rgb *= 1.0 - film.y * smoothstep(.22, .72, length(frame - .5));
-        outputColor = vec4(clamp(rgb, 0.0, 1.0), 1.0);
+        outputColor = vec4(clamp(monitorColor(source,rgb), 0.0, 1.0), 1.0);
     }
 """.trimIndent()

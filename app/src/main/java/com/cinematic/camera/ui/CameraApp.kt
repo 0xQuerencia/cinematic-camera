@@ -67,6 +67,8 @@ private val audioKey = booleanPreferencesKey("audio")
 private val liteKey = booleanPreferencesKey("lite_preview")
 private val favoriteKey = stringSetPreferencesKey("favorites")
 private val leftKey = booleanPreferencesKey("left_handed")
+private val hudKey = stringSetPreferencesKey("hidden_hud")
+private val horizonKey = booleanPreferencesKey("horizon")
 private val quickLooks by lazy {
     val featured = listOf("Neutral", "Golden Hour", "Film Print", "Steel Blue")
     originalLooks.sortedBy { featured.indexOf(it.name).takeIf { index -> index >= 0 } ?: featured.size }
@@ -86,6 +88,8 @@ fun CameraApp(engine: CameraEngine) {
     val prefs by context.preferences.data.collectAsStateWithLifecycle(initialValue = null)
     val pro = prefs?.get(proKey) ?: false
     val left = prefs?.get(leftKey) ?: false
+    val hiddenHud = prefs?.get(hudKey).orEmpty()
+    val horizon = prefs?.get(horizonKey) ?: false
     val scope = rememberCoroutineScope()
     val audioEnabled = prefs?.get(audioKey) ?: true
     val liteEnabled = prefs?.get(liteKey) ?: false
@@ -111,6 +115,15 @@ fun CameraApp(engine: CameraEngine) {
     LaunchedEffect(library) { engine.pausePreview(library) }
     fun selectMode(value: Boolean) { scope.launch { context.preferences.edit { it[proKey] = value } } }
     LaunchedEffect(instrument, lab, clearPreview, library) { engine.scopes(instrument != ScopeMode.OFF && !lab && !clearPreview && !library) }
+    LaunchedEffect(instrument, lab, clearPreview, library, zebraLevel, edgeSensitivity) {
+        val mode = if (lab || clearPreview || library) 0 else when (instrument) {
+            ScopeMode.ZEBRA -> 1
+            ScopeMode.PEAKING -> 2
+            ScopeMode.FALSE_COLOR -> 3
+            else -> 0
+        }
+        engine.monitoringOverlay(mode, zebraLevel/100f, edgeSensitivity/100f)
+    }
     var compare by remember { mutableStateOf(false) }
     var split by rememberSaveable { mutableStateOf(true) }
     var grade by remember { mutableStateOf(Grade()) }
@@ -413,6 +426,7 @@ fun CameraApp(engine: CameraEngine) {
                         Text("● REC ${state.timecode}", Modifier.align(Alignment.TopCenter).padding(top = if (!pro && !landscape && !lab) 64.dp else 8.dp)
                             .background(Ink.copy(alpha = .84f), InstrumentShape).padding(8.dp), color = Record, style = Timecode)
                     }
+                    if (horizon && !lab && !clearPreview) HorizonOverlay(Modifier.align(Alignment.Center).size(140.dp,48.dp))
                     if (!lab && !clearPreview && instrument != ScopeMode.OFF && state.pipeline != Pipeline.DIRECT) {
                         ScopeOverlay(engine, instrument, Modifier.align(Alignment.TopEnd).padding(8.dp), zebraLevel, edgeSensitivity, largeScope)
                     }
@@ -483,12 +497,12 @@ fun CameraApp(engine: CameraEngine) {
                             IconKey(ToolIcon.SETTINGS, "Settings", enabled = !state.active) { drawer = Drawer.SETTINGS }
                             Spacer(Modifier.width(4.dp))
                         }
-                        Telemetry("RES", if (state.photoMode) (if (state.rawPhoto) "DNG" else "JPEG") else state.format?.label ?: "—", !state.active) { drawer = Drawer.OUTPUT }
-                        Telemetry("FPS", if (state.photoMode) "Still" else state.fps?.let { "$it target" } ?: "Auto", !state.active && !state.photoMode) { drawer = Drawer.OUTPUT }
-                        Telemetry("CODEC", if (state.photoMode) (if (state.rawPhoto) "RAW" else "JPEG") else state.profile.label, !state.active) { drawer = Drawer.OUTPUT }
-                        Telemetry("LUT", if (state.photoMode) "Off" else grade.look.name, !state.active && !state.photoMode) { drawer = Drawer.LOOKS }
-                        Telemetry("LENS", state.lens?.label ?: "—", !state.active) { drawer = Drawer.LENS }
-                        Telemetry("STAB", if (state.stabilization && !state.photoMode) "On" else "Off", !state.active && !state.photoMode) { drawer = Drawer.OUTPUT }
+                        if ("RES" !in hiddenHud) Telemetry("RES", if (state.photoMode) (if (state.rawPhoto) "DNG" else "JPEG") else state.format?.label ?: "—", !state.active) { drawer = Drawer.OUTPUT }
+                        if ("FPS" !in hiddenHud) Telemetry("FPS", if (state.photoMode) "Still" else state.fps?.let { "$it target" } ?: "Auto", !state.active && !state.photoMode) { drawer = Drawer.OUTPUT }
+                        if ("CODEC" !in hiddenHud) Telemetry("CODEC", if (state.photoMode) (if (state.rawPhoto) "RAW" else "JPEG") else state.profile.label, !state.active) { drawer = Drawer.OUTPUT }
+                        if ("LUT" !in hiddenHud) Telemetry("LUT", if (state.photoMode) "Off" else grade.look.name, !state.active && !state.photoMode) { drawer = Drawer.LOOKS }
+                        if ("LENS" !in hiddenHud) Telemetry("LENS", state.lens?.label ?: "—", !state.active) { drawer = Drawer.LENS }
+                        if ("STAB" !in hiddenHud) Telemetry("STAB", if (state.stabilization && !state.photoMode) "On" else "Off", !state.active && !state.photoMode) { drawer = Drawer.OUTPUT }
                         if (landscape) {
                             ModeSwitch(pro, !state.active, ::selectMode)
                             Key("Auto Look", selected = autoLook, enabled = !state.active && !state.photoMode && !state.profile.hdr, action = ::toggleAutoLook)
@@ -514,7 +528,7 @@ fun CameraApp(engine: CameraEngine) {
                         }
                         Column(Modifier.weight(1f).fillMaxHeight()) {
                             liveContent(Modifier.weight(1f).fillMaxWidth().clip(InstrumentShape))
-                            if (pro && !lab) ExposureStrip(state) { drawer = it }
+                            if (pro && !lab) ExposureStrip(state, hiddenHud) { drawer = it }
                         }
                         if (!left && !lab) dock(true)
                         if (lab) Box(Modifier.widthIn(max = 340.dp).fillMaxHeight()) {
@@ -527,7 +541,7 @@ fun CameraApp(engine: CameraEngine) {
                     }
                 } else {
                     liveContent(Modifier.weight(if (lab) 1f else 1.7f).fillMaxWidth().clip(CardShape))
-                    if (pro && !lab) ExposureStrip(state) { drawer = it }
+                    if (pro && !lab) ExposureStrip(state, hiddenHud) { drawer = it }
                     if (lab) Box(Modifier.weight(.9f).fillMaxWidth()) {
                         LookLab(grade, split, history.isNotEmpty(), undone.isNotEmpty(), state.lite,
                             change = { value, checkpoint -> edit(value, checkpoint) }, onSplit = { split = !split },
@@ -595,6 +609,20 @@ fun CameraApp(engine: CameraEngine) {
                         ToggleRow("Clear viewfinder", clearPreview) { clearPreview = it }
                         Hint("Hides guides and sampled scopes, not the recording indicator or camera controls.")
                         ToggleRow("Large scope", largeScope) { largeScope = it }
+                        ToggleRow("Horizon level", horizon) { value ->
+                            scope.launch { context.preferences.edit { it[horizonKey] = value } }
+                        }
+                        Hint("Zebras, focus edges and false color draw only on preview-only GPU surfaces, never on encoder outputs. Small maps remain available as a fallback.")
+                        Section("Pro HUD visibility")
+                        listOf("RES","FPS","CODEC","LUT","LENS","STAB","ISO","SHUTTER","WB","FOCUS","EV").forEach { item ->
+                            ToggleRow(item, item !in hiddenHud) { visible ->
+                                scope.launch { context.preferences.edit {
+                                    val current = it[hudKey].orEmpty()
+                                    it[hudKey] = if (visible) current - item else current + item
+                                } }
+                            }
+                        }
+                        Key("Restore default HUD", Modifier.fillMaxWidth()) { scope.launch { context.preferences.edit { it.remove(hudKey) } } }
                         if (instrument == ScopeMode.ZEBRA) {
                             Precision("Clipping threshold", zebraLevel.toFloat(), 70f..100f, unit = "%") { zebraLevel = it.toInt() }
                         }

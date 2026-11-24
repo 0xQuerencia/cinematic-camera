@@ -36,6 +36,12 @@ import com.cinematic.camera.color.Look
 import com.cinematic.camera.color.SavedLook
 import com.cinematic.camera.color.ToneCurve
 import com.cinematic.camera.color.RgbCurves
+import com.cinematic.camera.color.Wheel
+import com.cinematic.camera.color.HueBand
+import com.cinematic.camera.color.ColorBalance
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 
 @Composable
 internal fun LookLab(grade: Grade, split: Boolean, canUndo: Boolean, canRedo: Boolean, lite: Boolean,
@@ -67,7 +73,7 @@ internal fun LookLab(grade: Grade, split: Boolean, canUndo: Boolean, canRedo: Bo
             }
         }
         KeysRow {
-            listOf("Adjust", "Curves", "FX", "LUT").forEach { tool ->
+            listOf("Adjust", "Curves", "Wheels", "HSL", "FX", "LUT").forEach { tool ->
                 Key(tool, selected = tab == tool) { tab = tool }
             }
         }
@@ -86,6 +92,8 @@ internal fun LookLab(grade: Grade, split: Boolean, canUndo: Boolean, canRedo: Bo
                 GradeSlider("Midtone gamma", grade, grade.curve, .5f..2f, change) { g, v -> g.copy(curve = v) }
                 CurveEditor(grade, change)
             }
+            "Wheels" -> BalanceEditor(grade, change)
+            "HSL" -> HslEditor(grade, change)
             "LUT" -> {
                 Key(grade.look.name, action = looks)
                 if (grade.look.cube != null) {
@@ -99,9 +107,82 @@ internal fun LookLab(grade: Grade, split: Boolean, canUndo: Boolean, canRedo: Bo
                 if (lite) Hint("Bloom and halation are skipped in Lite preview.")
                 GradeSlider("Bloom", grade, grade.bloom, 0f..1f, change) { g, v -> g.copy(bloom = v) }
                 GradeSlider("Halation", grade, grade.halation, 0f..1f, change) { g, v -> g.copy(halation = v) }
+                GradeSlider("Diffusion", grade, grade.diffusion, 0f..1f, change) { g, v -> g.copy(diffusion = v) }
+                Hint("Diffusion is a digital softening effect; skipped in Lite preview.")
             }
         }
     }
+}
+
+@Composable
+private fun BalanceEditor(grade: Grade, change: (Grade, Boolean) -> Unit) {
+    var zone by rememberSaveable { mutableStateOf("Shadows") }
+    fun get(g: Grade) = when (zone) {
+        "Midtones" -> g.balance.midtones
+        "Highlights" -> g.balance.highlights
+        else -> g.balance.shadows
+    }
+    fun set(g: Grade, w: Wheel) = g.copy(balance = when (zone) {
+        "Midtones" -> g.balance.copy(midtones = w)
+        "Highlights" -> g.balance.copy(highlights = w)
+        else -> g.balance.copy(shadows = w)
+    })
+    val value = get(grade)
+    val apply by rememberUpdatedState<(Wheel,Boolean)->Unit>({ w, checkpoint -> change(set(grade,w),checkpoint) })
+    KeysRow {
+        listOf("Shadows","Midtones","Highlights").forEach { item -> Key(item,selected = item == zone) { zone = item } }
+        Key("Reset") { change(set(grade,Wheel()),true) }
+    }
+    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        Canvas(Modifier.size(144.dp).pointerInput(zone) {
+            detectTapGestures { point ->
+                val radius = minOf(size.width, size.height) * .43f
+                apply(Wheel.at((point.x-size.width/2f)/radius, (size.height/2f-point.y)/radius),true)
+            }
+        }.pointerInput(zone) {
+            fun wheel(point: Offset): Wheel {
+                val radius = minOf(size.width, size.height) * .43f
+                return Wheel.at((point.x-size.width/2f)/radius,(size.height/2f-point.y)/radius)
+            }
+            detectDragGestures(onDragStart = { apply(wheel(it),true) }) { event, _ ->
+                event.consume()
+                apply(wheel(event.position),false)
+            }
+        }) {
+            val radius = size.minDimension*.43f
+            drawCircle(Field,radius)
+            for (i in 0 until 24) drawArc(Color.hsv(i*15f, .9f, .95f),-i*15f-15f,15.5f,false,
+                topLeft=Offset(center.x-radius,center.y-radius),size=Size(radius*2,radius*2),
+                style=androidx.compose.ui.graphics.drawscope.Stroke(6.dp.toPx()))
+            drawLine(Rule,Offset(center.x-radius,center.y),Offset(center.x+radius,center.y))
+            drawLine(Rule,Offset(center.x,center.y-radius),Offset(center.x,center.y+radius))
+            drawCircle(Paper,5.dp.toPx(),Offset(center.x+value.x*radius,center.y-value.y*radius))
+        }
+    }
+    GradeSlider("Red / cyan", grade, value.x, -1f..1f, change) { g,v -> set(g,Wheel.at(v,get(g).y)) }
+    GradeSlider("Green / magenta", grade, value.y, -1f..1f, change) { g,v -> set(g,Wheel.at(get(g).x,v)) }
+    Hint("Drag the wheel to tint one tonal zone. The numeric controls are also accessible.")
+}
+
+@Composable
+private fun HslEditor(grade: Grade, change: (Grade, Boolean) -> Unit) {
+    var selected by rememberSaveable { mutableIntStateOf(0) }
+    val bands = listOf("Red","Yellow","Green","Cyan","Blue","Magenta")
+    KeysRow {
+        bands.forEachIndexed { i,name -> Key(name,selected = selected == i) { selected = i } }
+    }
+    val band = grade.hsl.bands[selected]
+    Key("Reset ${bands[selected]}") { change(grade.copy(hsl=grade.hsl.update(selected,HueBand())),true) }
+    GradeSlider("Hue shift",grade,band.hue,-30f..30f,change) { g,v ->
+        g.copy(hsl=g.hsl.update(selected,g.hsl.bands[selected].copy(hue=v)))
+    }
+    GradeSlider("Saturation",grade,band.saturation,-.5f.. .5f,change) { g,v ->
+        g.copy(hsl=g.hsl.update(selected,g.hsl.bands[selected].copy(saturation=v)))
+    }
+    GradeSlider("Lightness",grade,band.lightness,-.15f.. .15f,change) { g,v ->
+        g.copy(hsl=g.hsl.update(selected,g.hsl.bands[selected].copy(lightness=v)))
+    }
+    Hint("Six overlapping hue bands with smooth blending. Neutral pixels stay neutral.")
 }
 
 @Composable
