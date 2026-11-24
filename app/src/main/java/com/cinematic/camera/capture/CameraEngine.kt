@@ -750,7 +750,10 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
                         val uri = event.outputResults.outputUri
                         scope.launch {
                             val message = withContext(Dispatchers.IO) {
-                                if (uri == android.net.Uri.EMPTY) "No video was written (recorder status ${event.error})."
+                                if (uri == android.net.Uri.EMPTY) {
+                                    runCatching { clips.observeCapture(metadata, null) }
+                                    "No video was written (recorder status ${event.error})."
+                                }
                                 else runCatching {
                                     val measured = runCatching { clips.inspect(uri) }.onFailure {
                                         Log.w("CinematicCamera", "Could not inspect $uri", it)
@@ -759,6 +762,11 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
                                         if (measured.optString("videoMime") != current.profile.mime) add("codec")
                                         val transfer = measured.optInt(android.media.MediaFormat.KEY_COLOR_TRANSFER, -1)
                                         if (current.profile.hdr && transfer != android.media.MediaFormat.COLOR_TRANSFER_HLG) add("HLG transfer")
+                                        if (current.profile.hdr && measured.optInt(android.media.MediaFormat.KEY_PROFILE, -1) !in listOf(
+                                                android.media.MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10,
+                                                android.media.MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10,
+                                                android.media.MediaCodecInfo.CodecProfileLevel.HEVCProfileMain10HDR10Plus
+                                            )) add("10-bit HEVC profile unconfirmed")
                                         if (!current.profile.hdr && transfer in listOf(android.media.MediaFormat.COLOR_TRANSFER_HLG, android.media.MediaFormat.COLOR_TRANSFER_ST2084)) add("dynamic range")
                                         current.format?.let { format ->
                                             val width = measured.optInt("width")
@@ -773,6 +781,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
                                     }
                                     metadata.put("formatDifferences", JSONArray(differences))
                                     clips.save(uri, title, metadata, measured)
+                                    runCatching { clips.observeCapture(metadata, measured) }
                                     clips.finishJournal(title)
                                     when {
                                         measured == null -> "File retained. MP4 tracks could not be verified."

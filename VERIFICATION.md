@@ -33,7 +33,9 @@ The Android 15 x86_64 emulator used a virtual rear camera and SwiftShader. The b
 - Lite skips bloom and halation in Clean preview and reduces scope refresh. A clean clip's manifest can be rendered to a new MP4 offline. The source remains in the library. Scopes show downsampled source RGB. Clipping and edge aids appear as sample maps in sensor orientation.
 - DataStore holds UI preferences. Versioned local files store looks, presets, and clip manifests. MediaStore owns videos. Identical cubes in clip manifests share a content-addressed local file.
 
-## Remaining product work
+## Historical remaining-work notes
+
+The following list reflects the original development build, not the current source. See [ROADMAP_STATUS.md](ROADMAP_STATUS.md) and the exact commit's CI runs for current scope and results.
 
 - HDR/HLG, HEVC selection, RAW, genuine camera LOG, manual audio routing and gain, and native Kelvin where exposed.
 - Multi-point curves, hue curves, clip-based grading and adjustable split position, richer film-effect quality tiers, horizon level, torch control, and full-resolution on-image zebras and peaking.
