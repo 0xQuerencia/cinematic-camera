@@ -115,6 +115,8 @@ data class CaptureState(
     val ev: Int = 0, val audioIssue: Boolean = false,
     val torch: Boolean = false,
     val photoMode: Boolean = false, val rawPhoto: Boolean = false,
+    val shot: ShotInfo = ShotInfo(), val gyroAvailable: Boolean = false, val gyroEnabled: Boolean = false,
+    val recovering: Boolean = false, val pendingRecovery: Int = 0,
 ) {
     val active: Boolean get() = busy != Take.IDLE
     val timecode: String get() {
@@ -129,7 +131,14 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
     private val app = context.applicationContext
     private val main = ContextCompat.getMainExecutor(app)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val stateFlow = MutableStateFlow(CaptureState())
+    private val production = app.getSharedPreferences("production", Context.MODE_PRIVATE)
+    private val gyro = GyroRecorder(app)
+    private val stateFlow = MutableStateFlow(CaptureState(
+        shot = runCatching { ShotInfo.from(JSONObject(production.getString("shot", "{}") ?: "{}")) }.getOrDefault(ShotInfo()),
+        gyroAvailable = gyro.available,
+        gyroEnabled = gyro.available && production.getBoolean("gyro", false),
+        recovering = true,
+    ))
     val state = stateFlow.asStateFlow()
     private val scopeFrames = MutableStateFlow<ByteArray?>(null)
     val scopeSamples = scopeFrames.asStateFlow()
@@ -143,6 +152,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
     private var video: VideoCapture<Recorder>? = null
     private var photo: ImageCapture? = null
     private var recording: Recording? = null
+    private var cancelStart = false
     private var processor: ColorProcessor? = null
     private var binding = 0
     private var disposed = false
@@ -167,6 +177,38 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
             stateFlow.update { it.copy(bytes = bytes, thermal = heat, warning = warning) }
             if (bytes < stopBytes || heat >= 4) stop()
             delay(1500)
+        }
+    }
+
+    init { recoverRecordings() }
+
+    fun updateShot(value: ShotInfo) {
+        if (state.value.active) return
+        val shot = value.sanitized()
+        production.edit().putString("shot", shot.json().toString()).apply()
+        stateFlow.update { it.copy(shot = shot) }
+    }
+
+    fun enableGyro(enabled: Boolean) {
+        if (state.value.active || !gyro.available) return
+        production.edit().putBoolean("gyro", enabled).apply()
+        stateFlow.update { it.copy(gyroEnabled = enabled) }
+    }
+
+    fun recoverRecordings() {
+        if (state.value.active) return
+        stateFlow.update { it.copy(recovering = true) }
+        scope.launch {
+            val result = withContext(Dispatchers.IO) { runCatching { clips.recoverInterrupted() } }
+            val recovered = result.getOrNull() ?: 0
+            val unresolved = withContext(Dispatchers.IO) { clips.pendingCount() }
+            stateFlow.update { it.copy(recovering = false, pendingRecovery = unresolved,
+                clipRevision = it.clipRevision + if (recovered > 0) 1 else 0,
+                message = when {
+                    recovered > 0 -> "Recovered $recovered interrupted recording(s)."
+                    result.isFailure -> "Recording recovery could not finish."
+                    else -> it.message
+                }) }
         }
     }
 
@@ -460,6 +502,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
     @SuppressLint("MissingPermission")
     fun start(selectedGrade: Grade) {
         val current = state.value
+        if (current.recovering) { tell("Checking interrupted recordings."); return }
         if (current.photoMode) { capturePhoto(); return }
         val capture = video ?: return
         if (!current.ready || current.active) return
@@ -498,11 +541,26 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
             put("focusDioptersAtStartRequest", current.sensor.focus)
             put("awbModeAtStartRequest", current.sensor.awb)
             put("dynamicRangeRequested", "SDR")
+            put("shot", current.shot.json())
+            put("gyroRequested", current.gyroEnabled)
             if (current.pipeline != Pipeline.DIRECT) put("look", selectedGrade.toJson())
         }
         stateFlow.update { it.copy(busy = Take.STARTING, duration = 0, amplitude = null,
             message = null, audioIssue = false) }
+        cancelStart = false
+        scope.launch {
         try {
+            withContext(Dispatchers.IO) {
+                selectedGrade.look.cube?.takeIf { current.pipeline != Pipeline.DIRECT }?.let { cube ->
+                    metadata.put("cube", buildString { cube.writeTo(this) })
+                }
+                clips.beginJournal(title, metadata)
+            }
+            if (cancelStart || disposed || !owner.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
+                withContext(Dispatchers.IO) { clips.finishJournal(title) }
+                stateFlow.update { it.copy(busy = Take.IDLE, message = "Recording start cancelled.") }
+                return@launch
+            }
             val pending = capture.output.prepareRecording(app, options)
             if (current.audio) pending.withAudioEnabled()
             recording = pending.start(main) { event ->
@@ -514,11 +572,18 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
                         audioIssue = it.audioIssue || (current.audio && stats.audioStats.hasError()))
                 }
                 when (event) {
-                    is VideoRecordEvent.Start -> stateFlow.update {
-                        if (it.busy == Take.STARTING) it.copy(busy = Take.RECORDING) else it
+                    is VideoRecordEvent.Start -> {
+                        if (current.gyroEnabled && state.value.busy == Take.STARTING) {
+                            if (!gyro.start(title)) metadata.put("gyroError", "Could not start gyroscope.")
+                        }
+                        stateFlow.update { if (it.busy == Take.STARTING) it.copy(busy = Take.RECORDING) else it }
+                        val nextShot = current.shot.copy(take = (current.shot.take + 1).coerceAtMost(9999))
+                        production.edit().putString("shot", nextShot.json().toString()).apply()
+                        stateFlow.update { it.copy(shot = nextShot) }
                     }
                     is VideoRecordEvent.Finalize -> {
                         recording = null
+                        gyro.stop()?.let { metadata.put("gyro", it) }
                         metadata.put("recorderError", event.error)
                         metadata.put("audioIssue", state.value.audioIssue)
                         metadata.put("recordedBytes", stats.numBytesRecorded)
@@ -529,9 +594,6 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
                             val message = withContext(Dispatchers.IO) {
                                 if (uri == android.net.Uri.EMPTY) "No video was written (recorder status ${event.error})."
                                 else runCatching {
-                                    selectedGrade.look.cube?.takeIf { current.pipeline != Pipeline.DIRECT }?.let { cube ->
-                                        metadata.put("cube", buildString { cube.writeTo(this) })
-                                    }
                                     val measured = runCatching { clips.inspect(uri) }.onFailure {
                                         Log.w("CinematicCamera", "Could not inspect $uri", it)
                                     }.getOrNull()
@@ -549,6 +611,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
                                     }
                                     metadata.put("formatDifferences", JSONArray(differences))
                                     clips.save(uri, title, metadata, measured)
+                                    clips.finishJournal(title)
                                     when {
                                         measured == null -> "File retained. MP4 tracks could not be verified."
                                         event.hasError() -> "Recovered video after recorder status ${event.error}."
@@ -558,7 +621,8 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
                                     }
                                 }.getOrElse { "Video retained in Movies. Look manifest could not be saved." }
                             }
-                            stateFlow.update { it.copy(busy = Take.IDLE, message = message, clipRevision = it.clipRevision + 1) }
+                            val unresolved = withContext(Dispatchers.IO) { clips.pendingCount() }
+                            stateFlow.update { it.copy(busy = Take.IDLE, message = message, clipRevision = it.clipRevision + 1, pendingRecovery = unresolved) }
                             processor?.compare = compare
                             processor?.split = split
                         }
@@ -569,7 +633,10 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
             stateFlow.update { it.copy(busy = Take.IDLE) }
             processor?.compare = compare
             processor?.split = split
+            val unresolved = withContext(Dispatchers.IO) { clips.pendingCount() }
+            stateFlow.update { it.copy(pendingRecovery = unresolved) }
             problem("Could not start recording", error)
+        }
         }
     }
 
@@ -615,7 +682,10 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
     }
 
     fun stop() {
-        val running = recording ?: return
+        val running = recording ?: run {
+            if (state.value.busy == Take.STARTING && !state.value.photoMode) cancelStart = true
+            return
+        }
         if (state.value.busy == Take.STOPPING) return
         stateFlow.update { it.copy(busy = Take.STOPPING) }
         running.stop()

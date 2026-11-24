@@ -62,6 +62,13 @@ internal fun MediaPanel(engine: CameraEngine, revision: Int, export: (String, St
                 else -> "Direct capture · clean file"
             }, Info)
             Hint(if (clip.details.optBoolean("verifiedTracks")) clip.summary else "Tracks could not be verified.")
+            capture?.optJSONObject("shot")?.let { shot ->
+                Section("Production")
+                Hint(listOf(shot.optString("project"), shot.optString("reel"), shot.optString("scene"),
+                    "Take ${shot.optInt("take", 1)}").filter { it.isNotBlank() }.joinToString(" · "))
+                shot.optString("notes").takeIf { it.isNotBlank() }?.let { Text(it) }
+            }
+            if (capture?.optBoolean("recoveredAfterProcessDeath") == true) Hint("Recovered after interruption. Verify playback.", Amber)
             if (playing) {
                 AndroidView(factory = {
                     VideoView(it).apply {
@@ -82,6 +89,13 @@ internal fun MediaPanel(engine: CameraEngine, revision: Int, export: (String, St
                         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     }
                     context.startActivity(Intent.createChooser(intent, "Share video"))
+                }
+                if (capture?.optJSONObject("gyro") != null) Key("Export gyro CSV") {
+                    scope.launch {
+                        runCatching { withContext(Dispatchers.IO) { checkNotNull(engine.clips.gyroText(clip)) } }
+                            .onSuccess { export("${clip.title}-gyro.csv", it) }
+                            .onFailure { error = "Gyroscope CSV unavailable or too large." }
+                    }
                 }
                 Key("Look manifest") {
                     scope.launch {
@@ -144,7 +158,8 @@ internal fun MediaPanel(engine: CameraEngine, revision: Int, export: (String, St
         else {
             OutlinedTextField(search, { search = it }, Modifier.fillMaxWidth(), singleLine = true,
                 placeholder = { Text("Search clips") })
-            val filtered = clips.filter { it.title.contains(search, ignoreCase = true) }
+            val filtered = clips.filter { it.title.contains(search, ignoreCase = true) ||
+                it.details.optJSONObject("capture")?.optJSONObject("shot")?.toString()?.contains(search, ignoreCase = true) == true }
             Hint("${filtered.size} clips · Newest first")
             LazyColumn(Modifier.fillMaxWidth().weight(1f), contentPadding = PaddingValues(bottom = 12.dp)) {
                 items(filtered, key = { it.uri.toString() }) { clip ->

@@ -113,7 +113,7 @@ internal class GradedExport(private val context: Context, private val clips: Cli
                 val ready = ContentValues().apply { put(MediaStore.Video.Media.IS_PENDING, 0) }
                 check(resolver.update(uri, ready, null, null) == 1) { "Could not publish the exported MP4." }
             }
-            val export = JSONObject(capture.toString())
+            val export = JSONObject(capture.toString()).apply { remove("gyro") }
                 .put("pipeline", "EXPORT").put("sourceClip", source.title)
                 .put("sourceRecorderError", capture.optInt("recorderError")).put("recorderError", 0)
                 .put("recordedBytes", file.length())

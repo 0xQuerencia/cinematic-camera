@@ -4,6 +4,10 @@ import android.content.Context
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.net.Uri
+import android.content.ContentUris
+import android.content.ContentValues
+import android.os.Build
+import android.provider.MediaStore
 import android.util.AtomicFile
 import org.json.JSONObject
 import java.io.File
@@ -23,6 +27,76 @@ data class Clip(val uri: Uri, val title: String, val details: JSONObject) {
 class Clips(private val context: Context) {
     private val directory = File(context.filesDir, "clips").apply { mkdirs() }
     private val cubes = File(context.filesDir, "clip-cubes").apply { mkdirs() }
+    private val journal = File(context.filesDir, "recording-journal").apply { mkdirs() }
+    private val gyro = File(context.filesDir, "gyro").apply { mkdirs() }
+
+    fun beginJournal(title: String, capture: JSONObject) {
+        require(title.matches(Regex("CAM_[0-9]+_[a-f0-9]{6}")))
+        write(AtomicFile(File(journal, "$title.json")), capture.toString().encodeToByteArray())
+    }
+
+    fun finishJournal(title: String) {
+        require(title.matches(Regex("CAM_[0-9]+_[a-f0-9]{6}")))
+        AtomicFile(File(journal, "$title.json")).delete()
+    }
+
+    fun pendingCount(): Int = journal.listFiles { f -> f.extension == "json" }?.size ?: 0
+
+    fun gyroText(clip: Clip): String? {
+        val filename = clip.details.optJSONObject("capture")?.optJSONObject("gyro")?.optString("file") ?: return null
+        if (!filename.matches(Regex("CAM_[0-9]+_[a-f0-9]{6}\\.csv"))) return null
+        val file = File(gyro, filename)
+        require(file.length() <= 32L * 1024 * 1024) { "Gyro CSV is too large for text export." }
+        return file.takeIf { it.isFile }?.readText()
+    }
+
+    /** Only examine journaled filenames. Never delete an incomplete or uninspectable MP4. */
+    @Suppress("DEPRECATION")
+    fun recoverInterrupted(): Int {
+        var recovered = 0
+        val resolver = context.contentResolver
+        val collection = MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+        for (file in journal.listFiles { f -> f.extension == "json" }.orEmpty()) {
+            val title = file.nameWithoutExtension
+            if (!title.matches(Regex("CAM_[0-9]+_[a-f0-9]{6}"))) continue
+            runCatching {
+                if (File(directory, "$title.json").isFile) {
+                    finishJournal(title)
+                    return@runCatching
+                }
+                val metadata = JSONObject(AtomicFile(file).readFully().decodeToString())
+                val modern = Build.VERSION.SDK_INT >= 29
+                val columns = if (modern) arrayOf(MediaStore.Video.Media._ID, MediaStore.Video.Media.IS_PENDING)
+                    else arrayOf(MediaStore.Video.Media._ID)
+                val queryUri = if (modern) MediaStore.setIncludePending(collection) else collection
+                val where = if (modern) "${MediaStore.Video.Media.DISPLAY_NAME}=? AND ${MediaStore.Video.Media.OWNER_PACKAGE_NAME}=?"
+                    else "${MediaStore.Video.Media.DISPLAY_NAME}=?"
+                val args = if (modern) arrayOf("$title.mp4", context.packageName) else arrayOf("$title.mp4")
+                val found = resolver.query(queryUri, columns, where, args, null)?.use { cursor ->
+                    if (!cursor.moveToFirst()) null else {
+                        val uri = ContentUris.withAppendedId(collection, cursor.getLong(0))
+                        val pending = modern && cursor.getInt(1) != 0
+                        if (cursor.moveToNext()) null else uri to pending
+                    }
+                } ?: return@runCatching
+                val measured = inspect(found.first)
+                metadata.put("recorderError", -1).put("recoveredAfterProcessDeath", true)
+                    .put("formatDifferences", org.json.JSONArray(listOf("interrupted recording")))
+                val gyroFile = File(gyro, "$title.csv")
+                if (gyroFile.isFile) metadata.put("gyro", JSONObject().put("file", gyroFile.name)
+                    .put("frameSynchronized", false).put("partial", true))
+                if (modern && found.second) {
+                    check(resolver.update(found.first, ContentValues().apply {
+                        put(MediaStore.Video.Media.IS_PENDING, 0)
+                    }, null, null) == 1)
+                }
+                save(found.first, title, metadata, measured)
+                finishJournal(title)
+                recovered++
+            }.onFailure { android.util.Log.w("CinematicCamera", "Recovery deferred for $title", it) }
+        }
+        return recovered
+    }
 
     fun cubeText(clip: Clip): String? {
         val capture = clip.details.optJSONObject("capture") ?: return null
@@ -156,5 +230,6 @@ class Clips(private val context: Context) {
     fun delete(clip: Clip) {
         check(context.contentResolver.delete(clip.uri, null, null) > 0) { "Video could not be deleted." }
         AtomicFile(File(directory, "${clip.title}.json")).delete()
+        if (clip.title.matches(Regex("CAM_[0-9]+_[a-f0-9]{6}"))) File(gyro, "${clip.title}.csv").delete()
     }
 }
