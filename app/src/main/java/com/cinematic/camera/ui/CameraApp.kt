@@ -601,7 +601,7 @@ fun CameraApp(engine: CameraEngine) {
                     Drawer.FOCUS -> FocusPanel(state, engine)
                     Drawer.WB -> WhiteBalancePanel(state, engine) { drawer = null; lab = true }
                     Drawer.LENS -> LensPanel(state, engine)
-                    Drawer.AUDIO -> AudioPanel(state, ::setAudio)
+                    Drawer.AUDIO -> AudioPanel(state, engine, ::setAudio)
                     Drawer.TOOLS -> QuickControls { drawer = it }
                     Drawer.MONITOR -> {
                         MonitorPanel(guide, { guide = it }, state, instrument, { instrument = it })
@@ -812,6 +812,8 @@ internal fun CaptureStatus(state: CaptureState, notice: String?) {
             Hint(if (state.photoMode) "PHOTO · ${if (state.rawPhoto) "DNG" else "JPEG"}" else state.pipeline.label, if (state.pipeline == Pipeline.BAKED) Amber else Info)
             Hint(if (state.photoMode) "${state.bytes / (1024 * 1024)} MB free" else "~${state.remainingMinutes} min free")
         }
+        if (state.active && state.audioMuted) Hint("MIC MUTED", Amber)
+        if (state.active && state.audioInputChanged) Hint("Audio device changed", Amber)
         val level = state.amplitude
         if (level != null) {
             val db = (20 * log10(level.coerceIn(.001, 1.0))).toInt()
