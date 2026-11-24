@@ -45,6 +45,8 @@ import com.cinematic.camera.capture.Pipeline
 import com.cinematic.camera.capture.Take
 import com.cinematic.camera.color.Cube
 import com.cinematic.camera.color.AutoLookSelector
+import com.cinematic.camera.color.AdaptiveColor
+import com.cinematic.camera.color.SceneAutoLook
 import com.cinematic.camera.color.Grade
 import com.cinematic.camera.color.Look
 import com.cinematic.camera.color.LookStorage
@@ -70,7 +72,7 @@ private val quickLooks by lazy {
 internal enum class Drawer(val label: String) {
     OUTPUT("Output"), EXPOSURE("Exposure"), FOCUS("Focus"), WB("White balance"),
     LENS("Lens"), AUDIO("Audio"), TOOLS("Manual controls"), LOOKS("Looks & presets"),
-    MEDIA("Media library"), SETTINGS("Settings & diagnostics"), MONITOR("Monitoring")
+    MEDIA("Media library"), COLORIST("Auto Look & colorist"), SETTINGS("Settings & diagnostics"), MONITOR("Monitoring")
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -112,9 +114,12 @@ fun CameraApp(engine: CameraEngine) {
     var autoLook by rememberSaveable { mutableStateOf(false) }
     var autoReason by remember { mutableStateOf<String?>(null) }
     val autoPicker = remember { AutoLookSelector() }
+    var adaptiveLook by rememberSaveable { mutableStateOf(false) }
+    var generating by remember { mutableStateOf(false) }
+    var referenceSource by remember { mutableStateOf<ByteArray?>(null) }
     val autoPixels by engine.scopeSamples.collectAsStateWithLifecycle()
-    LaunchedEffect(autoLook, lab, library, state.active) {
-        engine.autoLookSampling(autoLook && !lab && !library && !state.active)
+    LaunchedEffect(autoLook, lab, library, state.active, drawer) {
+        engine.autoLookSampling((autoLook || drawer == Drawer.COLORIST) && !lab && !library && !state.active)
     }
     LaunchedEffect(lab) {
         if (lab && autoLook) {
@@ -162,6 +167,51 @@ fun CameraApp(engine: CameraEngine) {
         }
         grade = value
         if (state.pipeline == Pipeline.DIRECT && value != Grade()) engine.configure(pipeline = Pipeline.CLEAN)
+    }
+    fun openColorist() {
+        if (state.active) return
+        if (state.pipeline == Pipeline.DIRECT) engine.configure(pipeline = Pipeline.CLEAN)
+        lab = false
+        drawer = Drawer.COLORIST
+    }
+    fun applyGenerated(look: Look) {
+        if (engine.state.value.active) return
+        autoLook = false
+        autoReason = null
+        autoPicker.reset()
+        currentSaved = null
+        edit(Grade(look = look, strength = 1f))
+        engine.tell("Generated ${look.name}. Save or export the cube to reuse it.")
+    }
+    fun generateScene() {
+        val pixels = autoPixels?.copyOf() ?: return
+        val choice = SceneAutoLook.recommend(pixels) ?: return
+        generating = true
+        scope.launch {
+            try {
+                val look = withContext(Dispatchers.Default) { AdaptiveColor.scene(pixels, choice) }
+                if (look != null) applyGenerated(look) else engine.tell("Could not generate a look from this scene.")
+            } catch (failure: Exception) {
+                engine.tell("Scene LUT generation failed.")
+            } finally { generating = false }
+        }
+    }
+    val referencePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val source = referenceSource
+        referenceSource = null
+        if (uri != null && source != null) {
+            generating = true
+            scope.launch {
+                try {
+                    val target = withContext(Dispatchers.IO) { referencePixels(context, uri) }
+                    val look = withContext(Dispatchers.Default) { AdaptiveColor.reference(source, target) }
+                    if (look != null) applyGenerated(look)
+                    else engine.tell("Reference matching needs usable source and reference contrast.")
+                } catch (failure: Exception) {
+                    engine.tell("Could not read or match the reference image.")
+                } finally { generating = false }
+            }
+        }
     }
     fun toggleAutoLook() {
         if (state.active) return
@@ -215,7 +265,7 @@ fun CameraApp(engine: CameraEngine) {
     }
     LaunchedEffect(Unit) { saved = withContext(Dispatchers.IO) { storage.all() } }
     LaunchedEffect(grade, compare, split, lab, state.busy) { engine.render(grade, compare, split && lab) }
-    LaunchedEffect(autoPixels, autoLook, state.active, state.pipeline, lab, library) {
+    LaunchedEffect(autoPixels, autoLook, state.active, state.pipeline, lab, library, adaptiveLook) {
         if (!autoLook || state.active || lab || library || state.pipeline == Pipeline.DIRECT) return@LaunchedEffect
         val pixels = autoPixels ?: return@LaunchedEffect
         if (pixels.isEmpty()) {
@@ -224,8 +274,10 @@ fun CameraApp(engine: CameraEngine) {
         }
         val recommendation = autoPicker.consider(pixels, SystemClock.elapsedRealtime()) ?: return@LaunchedEffect
         val selected = originalLooks.firstOrNull { it.name == recommendation.name } ?: return@LaunchedEffect
-        if (grade.look.name != selected.name || grade.strength != recommendation.strength) {
-            grade = Grade(look = selected, strength = recommendation.strength)
+        val generated = if (adaptiveLook) AdaptiveColor.scene(pixels, recommendation) else null
+        val next = generated?.let { Grade(look = it) } ?: Grade(look = selected, strength = recommendation.strength)
+        if (grade != next) {
+            grade = next
             currentSaved = null
         }
         autoReason = recommendation.reason
@@ -468,6 +520,7 @@ fun CameraApp(engine: CameraEngine) {
                         horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Key("Auto Look", selected = autoLook, enabled = !state.active, action = ::toggleAutoLook)
                         Key(grade.look.name, enabled = !state.active) { drawer = Drawer.LOOKS }
+                        Key("Colorist", enabled = !state.active, action = ::openColorist)
                         Key("Look Lab", enabled = !state.active) {
                             if (state.pipeline == Pipeline.DIRECT) engine.configure(pipeline = Pipeline.CLEAN)
                             lab = true
@@ -514,9 +567,28 @@ fun CameraApp(engine: CameraEngine) {
                             Precision("Edge sensitivity", edgeSensitivity.toFloat(), 0f..100f, unit = "%") { edgeSensitivity = it.toInt() }
                         }
                     }
+                    Drawer.COLORIST -> AdaptiveLookPanel(autoPixels, grade, autoLook, adaptiveLook,
+                        enabled = !state.active && state.pipeline != Pipeline.DIRECT, busy = generating,
+                        toggleAuto = ::toggleAutoLook,
+                        changeAdaptive = { adaptiveLook = it; autoPicker.reset() },
+                        choose = { choice ->
+                            originalLooks.firstOrNull { it.name == choice.name }?.let {
+                                autoLook = false; autoReason = null; currentSaved = null
+                                edit(Grade(look = it, strength = choice.strength))
+                            }
+                        }, generate = ::generateScene,
+                        match = {
+                            referenceSource = autoPixels?.copyOf()
+                            referencePicker.launch(arrayOf("image/*"))
+                        },
+                        save = { saveName = grade.look.name; saveAs = false },
+                        export = { grade.look.cube?.let { cube ->
+                            exportFile("generated-look.cube", buildString { cube.writeTo(this) })
+                        } })
                     Drawer.SETTINGS -> {
                         Key("Recording format", Modifier.fillMaxWidth()) { drawer = Drawer.OUTPUT }
                         Key("Microphone", Modifier.fillMaxWidth()) { drawer = Drawer.AUDIO }
+                        Key("Auto Look & colorist", Modifier.fillMaxWidth(), enabled = !state.active, action = ::openColorist)
                         ToggleRow("Left-handed landscape", left, !state.active) {
                             scope.launch { context.preferences.edit { prefs -> prefs[leftKey] = it } }
                         }
