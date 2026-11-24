@@ -4,6 +4,12 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ExposureMathTest {
+    @org.junit.Test fun matchedIsoPreservesExposureWithinSensorLimits() {
+        org.junit.Assert.assertEquals(200, ExposureMath.matchedIso(100, 20_000_000, 10_000_000, 50, 1600))
+        org.junit.Assert.assertEquals(1600, ExposureMath.matchedIso(800, 30_000_000, 10_000_000, 50, 1600))
+        org.junit.Assert.assertEquals(50, ExposureMath.matchedIso(100, 1_000_000, 20_000_000, 50, 1600))
+    }
+
     @Test fun standardShutterAngles() {
         assertEquals(20_833_333L, ExposureMath.angleToNanoseconds(180.0, 24))
         assertEquals(16_666_667L, ExposureMath.angleToNanoseconds(180.0, 30))

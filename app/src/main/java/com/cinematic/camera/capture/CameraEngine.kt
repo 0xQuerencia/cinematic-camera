@@ -126,6 +126,7 @@ data class CaptureState(
     val profile: VideoProfile = VideoProfile.AVC,
     val profileFormats: Map<VideoProfile, List<Format>> = emptyMap(),
     val fps: Int? = null, val bitrate: Int = 12, val pipeline: Pipeline = Pipeline.DIRECT,
+    val motionAngle: Double? = null,
     val stabilization: Boolean = false, val lite: Boolean = false, val audio: Boolean = true,
     val ready: Boolean = false, val gpuFailed: Boolean = false, val busy: Take = Take.IDLE,
     val duration: Long = 0, val amplitude: Double? = null, val bytes: Long = 0,
@@ -381,7 +382,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         val current = state.value
         if (current.active || current.photoMode == enabled) return
         stateFlow.update { it.copy(photoMode = enabled, rawPhoto = false, pipeline = Pipeline.DIRECT,
-            manual = Manual(), ev = 0, ready = false, message = null) }
+            manual = Manual(), motionAngle = null, ev = 0, ready = false, message = null) }
         bind()
     }
 
@@ -574,7 +575,8 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
                             stateFlow.update { it.copy(sensor = sample, ready = (video != null || photo != null) && !it.gpuFailed) }
                             if (!restored) {
                                 restored = true
-                                if (configuration.manual != Manual()) manual(configuration.manual)
+                                if (configuration.motionAngle != null) applyMotion(configuration.motionAngle, sample)
+                                else if (configuration.manual != Manual()) manual(configuration.manual)
                                 if (configuration.zoom != 1f) zoom(configuration.zoom)
                                 if (configuration.ev != 0) ev(configuration.ev)
                             }
@@ -690,6 +692,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
             put("stabilizationRequested", current.stabilization)
             put("isoAtStartRequest", current.sensor.iso)
             put("exposureNsAtStartRequest", current.sensor.shutter)
+            put("motionAngle", current.motionAngle)
             put("focusDioptersAtStartRequest", current.sensor.focus)
             put("awbModeAtStartRequest", current.sensor.awb)
             put("dynamicRangeRequested", if (current.profile.hdr) "HLG10" else "SDR")
@@ -977,7 +980,63 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         }, main)
     }
 
-    fun manual(value: Manual) {
+    fun motion(angle: Double?) {
+        val current = state.value
+        if (current.active || current.photoMode) return
+        if (angle == null) {
+            stateFlow.update { it.copy(motionAngle = null) }
+            manual(current.manual.copy(iso = null, shutter = null, aeLock = false))
+            return
+        }
+        applyMotion(angle, current.sensor)
+    }
+
+    private fun applyMotion(angle: Double, sensor: Sensor) {
+        val current = state.value
+        val fps = current.fps
+        val iso = current.controls.iso
+        val shutter = current.controls.shutter
+        val measuredIso = sensor.iso
+        val measuredExposure = sensor.shutter
+        if (current.photoMode || fps == null || iso == null || shutter == null ||
+            measuredIso == null || measuredExposure == null || measuredIso <= 0 || measuredExposure <= 0) {
+            stateFlow.update { it.copy(motionAngle = null) }
+            tell("Motion angle requires a fixed frame rate and measured manual sensor support.")
+            return
+        }
+        val ns = ExposureMath.angleToNanoseconds(angle, fps)
+        if (ns !in shutter.lower..minOf(shutter.upper, 1_000_000_000L / fps)) {
+            stateFlow.update { it.copy(motionAngle = null) }
+            tell("This angle is outside the lens exposure range at the selected rate.")
+            return
+        }
+        val matched = ExposureMath.matchedIso(measuredIso, measuredExposure, ns, iso.lower, iso.upper)
+        stateFlow.update { it.copy(motionAngle = angle) }
+        manual(current.manual.copy(iso = matched, shutter = ns, aeLock = false), preserveMotion = true)
+        if (matched == iso.lower || matched == iso.upper) tell("ISO reached a sensor limit; check exposure.")
+    }
+
+    fun performancePreset(lowLoad: Boolean) {
+        val current = state.value
+        if (current.active || current.photoMode) return
+        val profile = VideoProfile.AVC
+        if (current.profileFormats[profile].isNullOrEmpty()) {
+            tell("This lens does not advertise H.264 SDR."); return
+        }
+        selectVideoProfile(profile)
+        val next = state.value
+        val chosen = if (lowLoad) next.formats.filter { it.height <= 720 }.maxByOrNull { it.height }
+            ?: next.formats.minByOrNull { it.height }
+            else next.formats.filter { it.height <= 1080 }.maxByOrNull { it.height }
+            ?: next.formats.minByOrNull { it.height }
+        if (chosen == null) return
+        val fps = listOf(30, 25, 24).firstOrNull { it in chosen.rates }
+        setLite(lowLoad)
+        configure(chosen, fps, if (lowLoad) 6 else 12, if (lowLoad) Pipeline.DIRECT else Pipeline.CLEAN, false)
+        tell("Selected ${chosen.label} / ${fps?.toString() ?: "Auto"} fps for the next take. Verify actual output after recording.")
+    }
+
+    fun manual(value: Manual, preserveMotion: Boolean = false) {
         if (state.value.photoMode && state.value.active) return
         val camera = camera ?: return
         val current = state.value
@@ -1014,8 +1073,14 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         val future = Camera2CameraControl.from(camera.cameraControl).setCaptureRequestOptions(builder.build())
         future.addListener({
             if (this.camera === camera && token == lastRequest) runCatching { future.get() }
-                .onSuccess { stateFlow.update { it.copy(manual = value) } }
-                .onFailure { problem("Camera did not accept the manual request", it) }
+                .onSuccess { stateFlow.update {
+                    val changedExposure = it.manual.iso != value.iso || it.manual.shutter != value.shutter
+                    it.copy(manual = value, motionAngle = if (preserveMotion || !changedExposure) it.motionAngle else null)
+                } }
+                .onFailure {
+                    if (preserveMotion) stateFlow.update { it.copy(motionAngle = null) }
+                    problem("Camera did not accept the manual request", it)
+                }
         }, main)
     }
 
