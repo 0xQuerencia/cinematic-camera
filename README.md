@@ -34,6 +34,10 @@ The original Rec.709 look catalog now includes 29 looks. Import external .cube f
 
 Look Lab now provides five-knot master and individual red, green and blue curves with three adjustable interior points. Curves are evaluated by the same shader in preview, baked recording and graded export. Skin-tone protection is a warm-hue chroma mask, not a person detector; it preserves some color from before the creative LUT and curves and can affect similarly colored objects. Set it to zero for intentional monochrome or stylized skin. Existing saved looks load with identity curves and protection off.
 
+## Still photography (experimental)
+
+Select Photo in the capture screen, then Settings → Photo format. JPEG is the default; RAW/DNG is offered only when CameraX advertises the RAW still-image format for the active camera. The photo session uses a dedicated ImageCapture use case rather than taking a screenshot of the video preview. Still photos are ungraded and saved in Pictures/Cinematic Camera, available in the system gallery. Video looks and video-only settings are disabled in photo mode. Selecting a video look switches back to video capture. Manual exposure, focus and white-balance controls use the active camera's reported capabilities. RAW output, manual exposure and photo session compatibility require device tests. Bracketing and photo grading are not yet implemented.
+
 ## Verification
 
 ```sh
