@@ -32,6 +32,8 @@ import androidx.camera.core.CameraInfo
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.DynamicRange
 import androidx.camera.core.FocusMeteringAction
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.core.TorchState
 import androidx.camera.core.UseCaseGroup
@@ -93,6 +95,7 @@ data class Controls(
     val eis: Boolean = false, val zoom: ClosedFloatingPointRange<Float> = 1f..1f,
     val level: Int? = null, val physicalIds: Set<String> = emptySet(),
     val flash: Boolean = false, val antibandingModes: List<Int> = emptyList(),
+    val rawPhoto: Boolean = false,
 )
 data class Manual(
     val iso: Int? = null, val shutter: Long? = null, val focus: Float? = null,
@@ -111,6 +114,7 @@ data class CaptureState(
     val zoom: Float = 1f, val clipRevision: Int = 0,
     val ev: Int = 0, val audioIssue: Boolean = false,
     val torch: Boolean = false,
+    val photoMode: Boolean = false, val rawPhoto: Boolean = false,
 ) {
     val active: Boolean get() = busy != Take.IDLE
     val timecode: String get() {
@@ -137,6 +141,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
     private var camera: Camera? = null
     private var preview: Preview? = null
     private var video: VideoCapture<Recorder>? = null
+    private var photo: ImageCapture? = null
     private var recording: Recording? = null
     private var processor: ColorProcessor? = null
     private var binding = 0
@@ -228,7 +233,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         }
         stateFlow.update {
             it.copy(lens = lens, formats = formats, format = format, fps = fps, bitrate = bitrate, ready = false,
-                controls = capabilities(info), manual = Manual(), sensor = Sensor(), stabilization = false,
+                controls = capabilities(info), rawPhoto = false, manual = Manual(), sensor = Sensor(), stabilization = false,
                 ev = 0, zoom = 1f, message = if (changes.isEmpty()) null else "Lens switch changed ${changes.joinToString()} for the next take.")
         }
         bind()
@@ -241,11 +246,27 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         if (next != null) selectLens(next) else tell("Android exposes one camera.")
     }
 
+    fun photoMode(enabled: Boolean) {
+        val current = state.value
+        if (current.active || current.photoMode == enabled) return
+        stateFlow.update { it.copy(photoMode = enabled, rawPhoto = false, pipeline = Pipeline.DIRECT,
+            manual = Manual(), ev = 0, ready = false, message = null) }
+        bind()
+    }
+
+    fun rawPhoto(enabled: Boolean) {
+        val current = state.value
+        if (!current.photoMode || current.active || (enabled && !current.controls.rawPhoto) ||
+            current.rawPhoto == enabled) return
+        stateFlow.update { it.copy(rawPhoto = enabled, ready = false, message = null) }
+        bind()
+    }
+
     fun configure(format: Format? = state.value.format, fps: Int? = state.value.fps,
                   bitrate: Int = state.value.bitrate, pipeline: Pipeline = state.value.pipeline,
                   stabilization: Boolean = state.value.stabilization) {
         val old = state.value
-        if (old.active || (fps != null && fps !in format?.rates.orEmpty()) ||
+        if (old.active || old.photoMode || (fps != null && fps !in format?.rates.orEmpty()) ||
             (format != null && format !in old.formats) || bitrate !in 4..32 ||
             (stabilization && !old.controls.eis)) return
         if (format == old.format && fps == old.fps && bitrate == old.bitrate &&
@@ -290,6 +311,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         if (state.value.active) return
         preview?.targetRotation = rotation
         video?.targetRotation = rotation
+        photo?.targetRotation = rotation
     }
 
     fun pausePreview(paused: Boolean) {
@@ -304,6 +326,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
             processor = null
             camera = null
             video = null
+            photo = null
             preview = null
             stateFlow.update { it.copy(ready = false, torch = false) }
         } else bind()
@@ -323,6 +346,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         processor = null
         camera = null
         video = null
+        photo = null
         preview = null
         stateFlow.update { it.copy(ready = false, sensor = Sensor(), gpuFailed = false, torch = false) }
         val configuration = state.value
@@ -364,7 +388,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
                     main.execute {
                         if (!disposed && binding == generation &&
                             owner.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
-                            stateFlow.update { it.copy(sensor = sample, ready = video != null && !it.gpuFailed) }
+                            stateFlow.update { it.copy(sensor = sample, ready = (video != null || photo != null) && !it.gpuFailed) }
                             if (!restored) {
                                 restored = true
                                 if (configuration.manual != Manual()) manual(configuration.manual)
@@ -378,7 +402,12 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
             Camera2Interop.Extender(previewBuilder).setSessionCaptureCallback(callback)
             val surface = previewBuilder.build().also { it.surfaceProvider = view.surfaceProvider }
             val group = UseCaseGroup.Builder().addUseCase(surface)
-            val capture = configuration.format?.let { format ->
+            val still = if (configuration.photoMode) ImageCapture.Builder()
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
+                .setTargetRotation(rotation)
+                .setOutputFormat(if (configuration.rawPhoto) ImageCapture.OUTPUT_FORMAT_RAW else ImageCapture.OUTPUT_FORMAT_JPEG)
+                .build().also { group.addUseCase(it) } else null
+            val capture = configuration.format?.takeUnless { configuration.photoMode }?.let { format ->
                 val recorder = Recorder.Builder().setQualitySelector(QualitySelector.from(format.quality))
                     .setTargetVideoEncodingBitRate(configuration.bitrate * 1_000_000).build()
                 VideoCapture.Builder(recorder).setDynamicRange(DynamicRange.SDR)
@@ -386,7 +415,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
                     .apply { configuration.fps?.let { setTargetFrameRate(Range(it, it)) } }.build()
                     .also { group.addUseCase(it) }
             }
-            if (configuration.pipeline != Pipeline.DIRECT) {
+            if (!configuration.photoMode && configuration.pipeline != Pipeline.DIRECT) {
                 val effect = ColorProcessor(configuration.pipeline == Pipeline.BAKED, samples = { frame ->
                     main.execute { if (binding == generation && (scopes || autoLookSamples)) scopeFrames.value = frame }
                 }) { error ->
@@ -409,6 +438,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
             camera = bound
             preview = surface
             video = capture
+            photo = still
             bound.cameraInfo.torchState.observe(owner) { value ->
                 if (binding == generation) stateFlow.update { it.copy(torch = value == TorchState.ON) }
             }
@@ -430,6 +460,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
     @SuppressLint("MissingPermission")
     fun start(selectedGrade: Grade) {
         val current = state.value
+        if (current.photoMode) { capturePhoto(); return }
         val capture = video ?: return
         if (!current.ready || current.active) return
         if (current.bytes < stopBytes || current.thermal >= 4) {
@@ -542,6 +573,47 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         }
     }
 
+    private fun capturePhoto() {
+        val current = state.value
+        val capture = photo ?: return
+        if (current.active || !current.ready) return
+        if (current.bytes < stopBytes || current.thermal >= 4) {
+            tell("Photo capture is blocked by storage or temperature.")
+            return
+        }
+        if (Build.VERSION.SDK_INT < 29 && !permission(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
+            tell("Storage permission is required to save a photo.")
+            return
+        }
+        val raw = current.rawPhoto
+        val extension = if (raw) "dng" else "jpg"
+        val mime = if (raw) "image/x-adobe-dng" else "image/jpeg"
+        val title = "PHOTO_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}.$extension"
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, title)
+            put(MediaStore.Images.Media.MIME_TYPE, mime)
+            if (Build.VERSION.SDK_INT >= 29) put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Cinematic Camera")
+        }
+        val options = ImageCapture.OutputFileOptions.Builder(app.contentResolver,
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values).build()
+        stateFlow.update { it.copy(busy = Take.STARTING, message = null) }
+        try {
+            capture.takePicture(options, main, object : ImageCapture.OnImageSavedCallback {
+                override fun onImageSaved(output: ImageCapture.OutputFileResults) {
+                    stateFlow.update { it.copy(busy = Take.IDLE, message =
+                        if (output.savedUri != null) "Photo saved · $title" else "Camera did not return a saved photo URI.") }
+                }
+                override fun onError(exception: ImageCaptureException) {
+                    stateFlow.update { it.copy(busy = Take.IDLE) }
+                    problem("Photo capture failed", exception)
+                }
+            })
+        } catch (error: Exception) {
+            stateFlow.update { it.copy(busy = Take.IDLE) }
+            problem("Photo capture could not start", error)
+        }
+    }
+
     fun stop() {
         val running = recording ?: return
         if (state.value.busy == Take.STOPPING) return
@@ -625,7 +697,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         if (value.iso != null && value.shutter != null) {
             val iso = capabilities.iso?.clamp(value.iso) ?: return
             val range = capabilities.shutter ?: return
-            val frame = current.fps?.let { 1_000_000_000L / it }
+            val frame = current.fps?.takeUnless { current.photoMode }?.let { 1_000_000_000L / it }
             val shutter = range.clamp(value.shutter)
             if (frame != null && shutter > frame) {
                 tell("Exposure time exceeds the selected frame interval.")
@@ -720,6 +792,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
             zoom = (zoom?.minZoomRatio ?: 1f)..(zoom?.maxZoomRatio ?: 1f),
             level = camera2.getCameraCharacteristic(Keys.INFO_SUPPORTED_HARDWARE_LEVEL),
             flash = info.hasFlashUnit(),
+            rawPhoto = runCatching { ImageCapture.OUTPUT_FORMAT_RAW in ImageCapture.getImageCaptureCapabilities(info).supportedOutputFormats }.getOrDefault(false),
             antibandingModes = camera2.getCameraCharacteristic(Keys.CONTROL_AE_AVAILABLE_ANTIBANDING_MODES)?.toList().orEmpty(),
             physicalIds = if (Build.VERSION.SDK_INT >= 28) info.physicalCameraInfos
                 .map { Camera2CameraInfo.from(it).cameraId }.toSet() else emptySet(),
