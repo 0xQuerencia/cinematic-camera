@@ -92,10 +92,10 @@ internal fun Telemetry(label: String, value: String, enabled: Boolean = true, em
 }
 
 @Composable
-internal fun RecordKey(take: Take, enabled: Boolean, action: () -> Unit) {
+internal fun RecordKey(take: Take, enabled: Boolean, action: () -> Unit, photo: Boolean = false) {
     val label = when (take) {
-        Take.IDLE -> "Record video"
-        Take.STARTING -> "Starting recording"
+        Take.IDLE -> if (photo) "Take photo" else "Record video"
+        Take.STARTING -> if (photo) "Capturing photo" else "Starting recording"
         Take.RECORDING -> "Recording, stop"
         Take.STOPPING -> "Stopping recording"
         Take.VERIFYING -> "Verifying saved video"
@@ -106,7 +106,7 @@ internal fun RecordKey(take: Take, enabled: Boolean, action: () -> Unit) {
         contentAlignment = Alignment.Center) {
         Canvas(Modifier.fillMaxSize().padding(3.dp)) {
             drawCircle(Paper, radius = size.minDimension / 2 - 1.dp.toPx(), style = Stroke(2.dp.toPx()))
-            val color = if (!enabled && take == Take.IDLE) Muted else Record
+            val color = if (!enabled && take == Take.IDLE) Muted else if (photo) Paper else Record
             if (take == Take.RECORDING) {
                 val side = size.minDimension * .36f
                 drawRoundRect(color, topLeft = Offset(center.x - side / 2, center.y - side / 2),
