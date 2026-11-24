@@ -113,6 +113,7 @@ fun CameraApp(engine: CameraEngine) {
     var compare by remember { mutableStateOf(false) }
     var split by rememberSaveable { mutableStateOf(true) }
     var grade by remember { mutableStateOf(Grade()) }
+    var photoGrade by remember { mutableStateOf(Grade()) }
     var autoLook by rememberSaveable { mutableStateOf(false) }
     var autoReason by remember { mutableStateOf<String?>(null) }
     val autoPicker = remember { AutoLookSelector() }
@@ -143,7 +144,7 @@ fun CameraApp(engine: CameraEngine) {
         hasCamera = it
     }
     val recordPermissions = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
-        if (result.values.all { it }) engine.start(grade)
+        if (result.values.all { it }) engine.start(if (state.photoMode) photoGrade else grade)
         else engine.tell("Permission denied. Microphone audio can be turned off in Settings.")
     }
     val export = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
@@ -324,7 +325,7 @@ fun CameraApp(engine: CameraEngine) {
                 add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
             }
         }
-        if (permissions.isEmpty()) engine.start(grade)
+        if (permissions.isEmpty()) engine.start(if (state.photoMode) photoGrade else grade)
         else recordPermissions.launch(permissions.toTypedArray())
     }
     fun applySaved(item: SavedLook) {
@@ -576,7 +577,7 @@ fun CameraApp(engine: CameraEngine) {
                 }
                 state.message?.let { Hint(it, Amber) }
                 when (panel) {
-                    Drawer.OUTPUT -> OutputPanel(state, engine)
+                    Drawer.OUTPUT -> OutputPanel(state, engine, photoGrade) { photoGrade = it }
                     Drawer.EXPOSURE -> ExposurePanel(state, engine) { drawer = null; lab = true }
                     Drawer.FOCUS -> FocusPanel(state, engine)
                     Drawer.WB -> WhiteBalancePanel(state, engine) { drawer = null; lab = true }
