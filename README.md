@@ -30,6 +30,10 @@ Auto Look activates Clean preview if Direct was selected. It waits for three con
 
 The original Rec.709 look catalog now includes 29 looks. Import external .cube files only when you know their expected input color space. On slower phones, turn off Auto Look, enable Lite preview, or select Direct capture if preview or recorded FPS is unstable.
 
+## Precision grading
+
+Look Lab now provides five-knot master and individual red, green and blue curves with three adjustable interior points. Curves are evaluated by the same shader in preview, baked recording and graded export. Skin-tone protection is a warm-hue chroma mask, not a person detector; it preserves some color from before the creative LUT and curves and can affect similarly colored objects. Set it to zero for intentional monochrome or stylized skin. Existing saved looks load with identity curves and protection off.
+
 ## Verification
 
 ```sh
