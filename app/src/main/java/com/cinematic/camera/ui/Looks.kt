@@ -34,6 +34,8 @@ import androidx.compose.ui.unit.dp
 import com.cinematic.camera.color.Grade
 import com.cinematic.camera.color.Look
 import com.cinematic.camera.color.SavedLook
+import com.cinematic.camera.color.ToneCurve
+import com.cinematic.camera.color.RgbCurves
 
 @Composable
 internal fun LookLab(grade: Grade, split: Boolean, canUndo: Boolean, canRedo: Boolean, lite: Boolean,
@@ -77,19 +79,12 @@ internal fun LookLab(grade: Grade, split: Boolean, canUndo: Boolean, canRedo: Bo
                 GradeSlider("Saturation", grade, grade.saturation, 0f..2f, change) { g, v -> g.copy(saturation = v) }
                 GradeSlider("Digital temperature", grade, grade.temperature, -.3f.. .3f, change) { g, v -> g.copy(temperature = v) }
                 GradeSlider("Digital tint", grade, grade.tint, -.3f.. .3f, change) { g, v -> g.copy(tint = v) }
+                GradeSlider("Skin-tone protection", grade, grade.skinProtection, 0f..1f, change) { g, v -> g.copy(skinProtection = v) }
+                Hint("Protects warm-colored midtones from creative color shifts; not face detection. Also affects similar colors in the scene.")
             }
             "Curves" -> {
                 GradeSlider("Midtone gamma", grade, grade.curve, .5f..2f, change) { g, v -> g.copy(curve = v) }
-                Canvas(Modifier.fillMaxWidth().height(88.dp).background(Ink)) {
-                    var previous = Offset(0f, size.height)
-                    for (i in 1..64) {
-                        val x = i / 64f
-                        val y = Math.pow(x.toDouble(), grade.curve.toDouble()).toFloat()
-                        val next = Offset(x * size.width, (1 - y) * size.height)
-                        drawLine(Amber, previous, next, 1.5.dp.toPx())
-                        previous = next
-                    }
-                }
+                CurveEditor(grade, change)
             }
             "LUT" -> {
                 Key(grade.look.name, action = looks)
@@ -107,6 +102,62 @@ internal fun LookLab(grade: Grade, split: Boolean, canUndo: Boolean, canRedo: Bo
             }
         }
     }
+}
+
+@Composable
+private fun CurveEditor(grade: Grade, change: (Grade, Boolean) -> Unit) {
+    var channel by rememberSaveable { mutableStateOf("RGB") }
+    fun curveOf(curves: RgbCurves) = when (channel) {
+        "R" -> curves.red
+        "G" -> curves.green
+        "B" -> curves.blue
+        else -> curves.master
+    }
+    fun update(g: Grade, curve: ToneCurve): Grade = g.copy(curves = when (channel) {
+        "R" -> g.curves.copy(red = curve)
+        "G" -> g.curves.copy(green = curve)
+        "B" -> g.curves.copy(blue = curve)
+        else -> g.curves.copy(master = curve)
+    })
+    val curve = curveOf(grade.curves)
+    val stroke = when (channel) {
+        "R" -> Color(0xFFE47E77)
+        "G" -> Native
+        "B" -> Info
+        else -> Amber
+    }
+    KeysRow {
+        listOf("RGB", "R", "G", "B").forEach {
+            Key(it, selected = channel == it) { channel = it }
+        }
+        Key("Reset channel") { change(update(grade, ToneCurve()), true) }
+    }
+    Canvas(Modifier.fillMaxWidth().height(152.dp).background(Ink).padding(12.dp)) {
+        for (i in 0..4) {
+            val x = size.width * i / 4f
+            val y = size.height * i / 4f
+            drawLine(Rule, Offset(x, 0f), Offset(x, size.height), 1.dp.toPx())
+            drawLine(Rule, Offset(0f, y), Offset(size.width, y), 1.dp.toPx())
+        }
+        drawLine(Muted.copy(alpha = .4f), Offset(0f, size.height), Offset(size.width, 0f), 1.dp.toPx())
+        val points = listOf(0f, curve.low, curve.mid, curve.high, 1f)
+            .mapIndexed { i, y -> Offset(size.width * i / 4f, size.height * (1f - y)) }
+        points.zipWithNext().forEach { (a, b) -> drawLine(stroke, a, b, 2.dp.toPx()) }
+        points.drop(1).dropLast(1).forEach { drawCircle(stroke, 4.dp.toPx(), it) }
+    }
+    GradeSlider("Shadows · 25%", grade, curve.low, 0f..1f, change) { g, v ->
+        val c = curveOf(g.curves)
+        update(g, c.copy(low = v.coerceAtMost(c.mid)))
+    }
+    GradeSlider("Midtones · 50%", grade, curve.mid, 0f..1f, change) { g, v ->
+        val c = curveOf(g.curves)
+        update(g, c.copy(mid = v.coerceIn(c.low, c.high)))
+    }
+    GradeSlider("Highlights · 75%", grade, curve.high, 0f..1f, change) { g, v ->
+        val c = curveOf(g.curves)
+        update(g, c.copy(high = v.coerceAtLeast(c.mid)))
+    }
+    Hint("Master RGB followed by individual channels. Fixed black and white endpoints, ordered editable knots.")
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
