@@ -8,12 +8,14 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.cinematic.camera.capture.CameraEngine
+import com.cinematic.camera.capture.ExposureMath
 import com.cinematic.camera.capture.CaptureState
 import com.cinematic.camera.capture.Pipeline
 import kotlinx.coroutines.delay
@@ -174,6 +176,37 @@ internal fun ExposurePanel(state: CaptureState, engine: CameraEngine, lab: () ->
             val max = minOf(shutter.upper, state.fps?.let { 1_000_000_000L / it } ?: shutter.upper)
             Precision("Exposure time", manual.shutter / 1_000_000f, shutter.lower / 1_000_000f..max / 1_000_000f,
                 unit = " ms") { engine.manual(manual.copy(shutter = (it * 1_000_000).roundToLong())) }
+            val fps = state.fps
+            if (fps != null && max >= shutter.lower) {
+                Section("Shutter angle")
+                val actual = state.sensor.shutter?.let { ExposureMath.nanosecondsToAngle(it, fps) }
+                Hint(actual?.let { "Reported exposure at $fps fps target: %.1f°".format(it) }
+                    ?: "Waiting for the camera exposure readout.")
+                KeysRow {
+                    listOf(45.0, 90.0, 144.0, 172.8, 180.0, 216.0, 270.0, 360.0).forEach { angle ->
+                        val ns = ExposureMath.angleToNanoseconds(angle, fps)
+                        Key("${angle.toString().removeSuffix(".0")}°",
+                            selected = kotlin.math.abs(manual.shutter - ns) < 100_000,
+                            enabled = ns in shutter.lower..max) { engine.manual(manual.copy(shutter = ns)) }
+                    }
+                }
+                var mains by rememberSaveable { mutableStateOf(50) }
+                Section("Flicker guidance")
+                KeysRow {
+                    Key("50 Hz", selected = mains == 50) { mains = 50 }
+                    Key("60 Hz", selected = mains == 60) { mains = 60 }
+                }
+                val candidates = ExposureMath.mainsCandidates(fps, mains, shutter.lower, shutter.upper)
+                if (candidates.isEmpty()) Hint("No half-cycle exposure fits this frame rate and sensor range.")
+                else KeysRow {
+                    candidates.take(6).forEach { ns ->
+                        Key(ns.shutterLabel(), selected = kotlin.math.abs(manual.shutter - ns) < 100_000) {
+                            engine.manual(manual.copy(shutter = ns))
+                        }
+                    }
+                }
+                Hint("Mains-based suggestions can reduce flicker. LEDs with independent PWM may require different settings.")
+            }
         }
     } else Mark("Unavailable", "This camera does not expose manual ISO and exposure time. Use Auto exposure or EV compensation.")
     Section("Auto exposure")
@@ -185,6 +218,23 @@ internal fun ExposurePanel(state: CaptureState, engine: CameraEngine, lab: () ->
     } ?: Mark("Unavailable", "CameraX reports no EV compensation range.")
     ToggleRow("AE lock", manual.aeLock, controls.aeLock && manual.iso == null) {
         engine.manual(manual.copy(aeLock = it))
+    }
+    Section("Auto-exposure anti-banding")
+    if (controls.antibandingModes.isEmpty()) {
+        Mark("Unavailable", "This camera does not advertise anti-banding modes.")
+    } else {
+        KeysRow {
+            Key("Default", selected = manual.antibanding == null, enabled = manual.iso == null && !manual.aeLock) {
+                engine.manual(manual.copy(antibanding = null))
+            }
+            controls.antibandingModes.forEach { mode ->
+                Key(antibandingLabel(mode), selected = manual.antibanding == mode,
+                    enabled = manual.iso == null && !manual.aeLock) { engine.manual(manual.copy(antibanding = mode)) }
+            }
+        }
+        val confirmed = manual.antibanding != null && manual.antibanding == state.sensor.antibanding
+        Mark(if (confirmed && manual.iso == null) "Native" else "Checking",
+            "Reported: ${antibandingLabel(state.sensor.antibanding)}. Anti-banding is an auto-exposure request, not a guarantee.")
     }
     if (!controls.aeLock) Hint("This lens does not advertise AE lock.")
     else Mark(if (state.sensor.aeLocked) "Native" else "Checking", if (state.sensor.aeLocked) "Capture results report AE locked." else "Available in auto exposure.")
@@ -281,6 +331,12 @@ internal fun LensPanel(state: CaptureState, engine: CameraEngine) {
         Mark("Assisted", "Camera zoom may crop or switch lenses according to the device.")
         Precision("Zoom ratio", state.zoom, zoom, unit = "×", commit = engine::zoom)
     } else Mark("Unavailable", "No zoom range is reported for this camera.")
+    Section("Continuous light")
+    ToggleRow("Torch", state.torch, state.controls.flash && state.ready && !state.active &&
+        (state.thermal < 3 || state.torch), engine::setTorch)
+    Mark(if (!state.controls.flash) "Unavailable" else if (state.ready) "Native" else "Checking",
+        if (state.controls.flash) "Actual torch state reported by CameraX. Set before recording."
+        else "This lens does not advertise a flash unit.")
 }
 
 @Composable
@@ -315,6 +371,10 @@ internal fun Long?.shutterLabel(): String = when {
     else -> "%.2f s".format(this / 1_000_000_000.0)
 }
 
+internal fun antibandingLabel(value: Int?): String = when (value) {
+    0 -> "Off"; 1 -> "50 Hz"; 2 -> "60 Hz"; 3 -> "Auto"; else -> "—"
+}
+
 internal fun wbLabel(value: Int?): String = when (value) {
     0 -> "Off"; 1 -> "Auto"; 2 -> "Incandescent"; 3 -> "Fluorescent"; 4 -> "Warm fluorescent"
     5 -> "Daylight"; 6 -> "Cloudy"; 7 -> "Twilight"; 8 -> "Shade"; else -> "—"
@@ -341,9 +401,13 @@ internal fun diagnostics(state: CaptureState): JSONObject = JSONObject().apply {
         .put("minimumFocusDistanceDiopters", state.controls.focus.toDouble())
         .put("cameraAwbModes", JSONArray(state.controls.whiteBalance))
         .put("aeLock", state.controls.aeLock).put("awbLock", state.controls.wbLock)
-        .put("electronicStabilization", state.controls.eis))
+        .put("electronicStabilization", state.controls.eis)
+        .put("flashUnit", state.controls.flash)
+        .put("antiBandingModes", JSONArray(state.controls.antibandingModes)))
     put("lastSensorResult", JSONObject().put("iso", state.sensor.iso ?: JSONObject.NULL)
         .put("exposureNs", state.sensor.shutter ?: JSONObject.NULL)
         .put("awb", state.sensor.awb ?: JSONObject.NULL)
-        .put("focusDiopters", state.sensor.focus?.toDouble() ?: JSONObject.NULL))
+        .put("focusDiopters", state.sensor.focus?.toDouble() ?: JSONObject.NULL)
+        .put("antiBandingMode", state.sensor.antibanding ?: JSONObject.NULL)
+        .put("torch", state.torch))
 }
