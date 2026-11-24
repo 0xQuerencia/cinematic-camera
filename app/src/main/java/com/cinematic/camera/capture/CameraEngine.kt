@@ -33,6 +33,7 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.DynamicRange
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.Preview
+import androidx.camera.core.TorchState
 import androidx.camera.core.UseCaseGroup
 import androidx.camera.core.resolutionselector.AspectRatioStrategy
 import androidx.camera.core.resolutionselector.ResolutionSelector
@@ -83,6 +84,7 @@ data class Sensor(
     val iso: Int? = null, val shutter: Long? = null, val focus: Float? = null,
     val awb: Int? = null, val aeLocked: Boolean = false, val af: Int? = null,
     val ev: Int? = null, val eis: Boolean? = null, val awbLocked: Boolean = false,
+    val antibanding: Int? = null,
 )
 data class Controls(
     val iso: Range<Int>? = null, val shutter: Range<Long>? = null,
@@ -90,10 +92,12 @@ data class Controls(
     val aeLock: Boolean = false, val wbLock: Boolean = false, val whiteBalance: List<Int> = emptyList(),
     val eis: Boolean = false, val zoom: ClosedFloatingPointRange<Float> = 1f..1f,
     val level: Int? = null, val physicalIds: Set<String> = emptySet(),
+    val flash: Boolean = false, val antibandingModes: List<Int> = emptyList(),
 )
 data class Manual(
     val iso: Int? = null, val shutter: Long? = null, val focus: Float? = null,
     val wb: Int? = null, val aeLock: Boolean = false, val wbLock: Boolean = false,
+    val antibanding: Int? = null,
 )
 data class CaptureState(
     val lenses: List<Lens> = emptyList(), val lens: Lens? = null,
@@ -106,6 +110,7 @@ data class CaptureState(
     val controls: Controls = Controls(), val sensor: Sensor = Sensor(), val manual: Manual = Manual(),
     val zoom: Float = 1f, val clipRevision: Int = 0,
     val ev: Int = 0, val audioIssue: Boolean = false,
+    val torch: Boolean = false,
 ) {
     val active: Boolean get() = busy != Take.IDLE
     val timecode: String get() {
@@ -293,13 +298,14 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         if (paused) {
             binding++
             camera?.cameraInfo?.cameraState?.removeObservers(owner)
+            camera?.cameraInfo?.torchState?.removeObservers(owner)
             provider?.unbindAll()
             processor?.close()
             processor = null
             camera = null
             video = null
             preview = null
-            stateFlow.update { it.copy(ready = false) }
+            stateFlow.update { it.copy(ready = false, torch = false) }
         } else bind()
     }
 
@@ -311,13 +317,14 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         val generation = ++binding
         scopeFrames.value = null
         camera?.cameraInfo?.cameraState?.removeObservers(owner)
+        camera?.cameraInfo?.torchState?.removeObservers(owner)
         provider.unbindAll()
         processor?.close()
         processor = null
         camera = null
         video = null
         preview = null
-        stateFlow.update { it.copy(ready = false, sensor = Sensor(), gpuFailed = false) }
+        stateFlow.update { it.copy(ready = false, sensor = Sensor(), gpuFailed = false, torch = false) }
         val configuration = state.value
         val selector = CameraSelector.Builder().addCameraFilter { candidates ->
             candidates.filter { Camera2CameraInfo.from(it).cameraId == lens.id }
@@ -352,7 +359,8 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
                         result.get(CaptureResult.CONTROL_AF_STATE),
                         result.get(CaptureResult.CONTROL_AE_EXPOSURE_COMPENSATION),
                         result.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE)?.let { it != 0 },
-                        result.get(CaptureResult.CONTROL_AWB_LOCK) == true)
+                        result.get(CaptureResult.CONTROL_AWB_LOCK) == true,
+                        result.get(CaptureResult.CONTROL_AE_ANTIBANDING_MODE))
                     main.execute {
                         if (!disposed && binding == generation &&
                             owner.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
@@ -401,6 +409,9 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
             camera = bound
             preview = surface
             video = capture
+            bound.cameraInfo.torchState.observe(owner) { value ->
+                if (binding == generation) stateFlow.update { it.copy(torch = value == TorchState.ON) }
+            }
             bound.cameraInfo.cameraState.observe(owner) { result ->
                 if (binding == generation) {
                     result.error?.let { problem("Camera session error ${it.code}", it.cause) }
@@ -591,6 +602,21 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         }, main)
     }
 
+    fun setTorch(enabled: Boolean) {
+        val camera = camera ?: return
+        val current = state.value
+        if (!current.controls.flash || current.active || !current.ready) return
+        if (enabled && current.thermal >= 3) {
+            tell("Torch is disabled while the device is hot.")
+            return
+        }
+        val future = camera.cameraControl.enableTorch(enabled)
+        future.addListener({
+            if (this.camera === camera) runCatching { future.get() }
+                .onFailure { problem("Camera did not accept the torch request", it) }
+        }, main)
+    }
+
     fun manual(value: Manual) {
         val camera = camera ?: return
         val current = state.value
@@ -611,6 +637,9 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
             if (frame != null) builder.setCaptureRequestOption(CaptureRequest.SENSOR_FRAME_DURATION, frame)
         } else if (value.aeLock && capabilities.aeLock) {
             builder.setCaptureRequestOption(CaptureRequest.CONTROL_AE_LOCK, true)
+        }
+        if (value.iso == null) value.antibanding?.takeIf { it in capabilities.antibandingModes }?.let {
+            builder.setCaptureRequestOption(CaptureRequest.CONTROL_AE_ANTIBANDING_MODE, it)
         }
         value.focus?.takeIf { capabilities.focus > 0f }?.let {
             builder.setCaptureRequestOption(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF)
@@ -641,6 +670,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         stop()
         monitor.cancel()
         camera?.cameraInfo?.cameraState?.removeObservers(owner)
+        camera?.cameraInfo?.torchState?.removeObservers(owner)
         provider?.unbindAll()
         processor?.close()
         view = null
@@ -689,6 +719,8 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
             eis = Recorder.getVideoCapabilities(info).isStabilizationSupported,
             zoom = (zoom?.minZoomRatio ?: 1f)..(zoom?.maxZoomRatio ?: 1f),
             level = camera2.getCameraCharacteristic(Keys.INFO_SUPPORTED_HARDWARE_LEVEL),
+            flash = info.hasFlashUnit(),
+            antibandingModes = camera2.getCameraCharacteristic(Keys.CONTROL_AE_AVAILABLE_ANTIBANDING_MODES)?.toList().orEmpty(),
             physicalIds = if (Build.VERSION.SDK_INT >= 28) info.physicalCameraInfos
                 .map { Camera2CameraInfo.from(it).cameraId }.toSet() else emptySet(),
         )
