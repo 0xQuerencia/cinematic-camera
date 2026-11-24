@@ -167,6 +167,7 @@ fun CameraApp(engine: CameraEngine) {
         if (autoLook && state.pipeline == Pipeline.DIRECT) engine.configure(pipeline = Pipeline.CLEAN)
     }
     fun choose(value: Look) {
+        if (state.photoMode) engine.photoMode(false)
         autoLook = false
         autoReason = null
         currentSaved = null
@@ -237,6 +238,7 @@ fun CameraApp(engine: CameraEngine) {
         view.post { view.display?.rotation?.let(engine::orientation) }
     }
     fun selectCaptureMode(photo: Boolean) {
+        if (state.active || state.photoMode == photo) return
         autoLook = false
         autoReason = null
         autoPicker.reset()
@@ -259,6 +261,7 @@ fun CameraApp(engine: CameraEngine) {
         else recordPermissions.launch(permissions.toTypedArray())
     }
     fun applySaved(item: SavedLook) {
+        if (state.photoMode) engine.photoMode(false)
         autoLook = false
         autoReason = null
         val configuration = item.capture
@@ -291,6 +294,7 @@ fun CameraApp(engine: CameraEngine) {
     }
 
     fun quickPreset(choice: StoryPreset) {
+        if (state.photoMode) engine.photoMode(false)
         autoLook = false
         autoReason = null
         val format = state.formats.firstOrNull { it.label == "1080p" }
@@ -388,7 +392,7 @@ fun CameraApp(engine: CameraEngine) {
                     if (lab) Text("Look Lab", Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
                     else {
                         Box(Modifier.weight(1f)) { ModeSwitch(pro, !state.active, ::selectMode) }
-                        Key("${state.format?.label ?: "—"} · ${state.fps ?: "Auto"}", enabled = !state.active) {
+                        Key(if (state.photoMode) (if (state.rawPhoto) "DNG" else "JPEG") else "${state.format?.label ?: "—"} · ${state.fps ?: "Auto"}", enabled = !state.active) {
                             drawer = Drawer.OUTPUT
                         }
                     }
@@ -509,7 +513,7 @@ fun CameraApp(engine: CameraEngine) {
                     Drawer.TOOLS -> QuickControls { drawer = it }
                     Drawer.MONITOR -> MonitorPanel(guide, { guide = it }, state, instrument, { instrument = it })
                     Drawer.SETTINGS -> {
-                        Key("Recording format", Modifier.fillMaxWidth()) { drawer = Drawer.OUTPUT }
+                        Key(if (state.photoMode) "Photo format" else "Recording format", Modifier.fillMaxWidth()) { drawer = Drawer.OUTPUT }
                         Key("Microphone", Modifier.fillMaxWidth()) { drawer = Drawer.AUDIO }
                         ToggleRow("Left-handed landscape", left, !state.active) {
                             scope.launch { context.preferences.edit { prefs -> prefs[leftKey] = it } }
