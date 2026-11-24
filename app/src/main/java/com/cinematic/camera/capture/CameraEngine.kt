@@ -180,6 +180,27 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
     private var grade = Grade()
     private var compare = false
     private var split = false
+    internal val remote = RemoteLink(app) { request ->
+        val current = state.value
+        if (disposed || !owner.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) {
+            "Camera must be in the foreground."
+        } else when (request) {
+            RemoteCommand.STATUS -> "${current.busy.name} · ${current.timecode} · ${current.format?.label ?: "No video format"} · ${current.zoom}x"
+            RemoteCommand.START -> if (current.photoMode || !current.ready || current.active || current.recovering) "Camera not ready for video."
+                else { start(grade); "Start requested · ${state.value.busy.name}" }
+            RemoteCommand.STOP -> if (!current.active || current.photoMode) "No video recording to stop."
+                else { stop(); "Stop requested." }
+            RemoteCommand.ZOOM_IN, RemoteCommand.ZOOM_OUT -> {
+                if (!current.ready || current.photoMode) "Camera not ready."
+                else {
+                    val delta = if (request == RemoteCommand.ZOOM_IN) .2f else -.2f
+                    zoom((current.zoom + delta).coerceIn(current.controls.zoom))
+                    "Zoom requested."
+                }
+            }
+        }
+    }
+    fun disconnectRemote() { remote.disconnect() }
     private val power = app.getSystemService(PowerManager::class.java)
     private val monitor = scope.launch {
         while (true) {
@@ -931,6 +952,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
 
     fun close() {
         disposed = true
+        remote.close()
         stop()
         monitor.cancel()
         camera?.cameraInfo?.cameraState?.removeObservers(owner)
