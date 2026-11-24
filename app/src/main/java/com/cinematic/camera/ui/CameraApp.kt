@@ -659,6 +659,18 @@ fun CameraApp(engine: CameraEngine) {
                         ToggleRow("Left-handed landscape", left, !state.active) {
                             scope.launch { context.preferences.edit { prefs -> prefs[leftKey] = it } }
                         }
+                        Section("Performance profiles")
+                        KeysRow {
+                            Key("Low load", enabled = !state.active && !state.photoMode) {
+                                engine.performancePreset(true)
+                                scope.launch { context.preferences.edit { it[liteKey] = true } }
+                            }
+                            Key("Balanced", enabled = !state.active && !state.photoMode) {
+                                engine.performancePreset(false)
+                                scope.launch { context.preferences.edit { it[liteKey] = false } }
+                            }
+                        }
+                        Hint("Low load prioritizes direct SDR recording. Balanced uses clean capture with preview grading. Both use advertised formats; actual FPS is measured.")
                         ToggleRow("Lite preview", state.lite, !state.active) { enabled ->
                             engine.setLite(enabled)
                             scope.launch { context.preferences.edit { it[liteKey] = enabled } }

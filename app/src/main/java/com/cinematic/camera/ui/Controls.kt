@@ -204,6 +204,17 @@ internal fun ExposurePanel(state: CaptureState, engine: CameraEngine, lab: () ->
     val manual = state.manual
     val iso = controls.iso
     val shutter = controls.shutter
+    Section("Motion angle")
+    val motionAvailable = !state.photoMode && !state.active && state.fps != null &&
+        iso != null && shutter != null && state.sensor.iso != null && state.sensor.shutter != null
+    KeysRow {
+        Key("Off", selected = state.motionAngle == null, enabled = !state.active && state.motionAngle != null) { engine.motion(null) }
+        listOf(90.0, 172.8, 180.0, 270.0).forEach { angle ->
+            Key("${angle.toString().removeSuffix(".0")}°", selected = state.motionAngle == angle,
+                enabled = motionAvailable) { engine.motion(angle) }
+        }
+    }
+    Hint("Locks the chosen shutter angle across frame-rate changes, matching ISO to the measured exposure when applied. Not continuous auto ISO.")
     Section("ISO & shutter")
     Text("ISO ${state.sensor.iso ?: "—"}  ·  ${state.sensor.shutter.shutterLabel()}", style = Numeric)
     if (iso != null && shutter != null) {
@@ -454,6 +465,9 @@ internal fun wbLabel(value: Int?): String = when (value) {
 internal fun diagnostics(state: CaptureState): JSONObject = JSONObject().apply {
     put("version", 1)
     put("androidApi", Build.VERSION.SDK_INT)
+    put("manufacturer", Build.MANUFACTURER)
+    put("model", Build.MODEL)
+    put("motionAngle", state.motionAngle ?: JSONObject.NULL)
     put("lens", state.lens?.label ?: JSONObject.NULL)
     put("cameraHardwareLevel", state.controls.level ?: JSONObject.NULL)
     put("physicalCameraIds", JSONArray(state.controls.physicalIds.toList()))

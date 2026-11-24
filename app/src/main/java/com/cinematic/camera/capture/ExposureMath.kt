@@ -8,6 +8,11 @@ object ExposureMath {
         return (1_000_000_000.0 * angle / (360.0 * fps)).roundToLong()
     }
 
+    fun matchedIso(iso: Int, oldExposure: Long, newExposure: Long, min: Int, max: Int): Int {
+        require(iso > 0 && oldExposure > 0 && newExposure > 0 && min > 0 && max >= min)
+        return (iso.toDouble() * oldExposure / newExposure).coerceIn(min.toDouble(), max.toDouble()).roundToLong().toInt()
+    }
+
     fun nanosecondsToAngle(ns: Long, fps: Int): Double? {
         if (ns <= 0L || fps <= 0) return null
         return ns * fps / 1_000_000_000.0 * 360.0
