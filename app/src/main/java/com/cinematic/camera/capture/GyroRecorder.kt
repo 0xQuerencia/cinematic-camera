@@ -30,6 +30,7 @@ internal class GyroRecorder(context: Context) : SensorEventListener {
 
     @Synchronized fun start(title: String): Boolean {
         val gyro = sensor ?: return false
+        val sensorManager = manager ?: return false
         if (writer != null) return false
         require(title.matches(Regex("CAM_[0-9]+_[a-f0-9]{6}")))
         val file = File(directory, "$title.csv")
@@ -42,7 +43,7 @@ internal class GyroRecorder(context: Context) : SensorEventListener {
             anchor = SystemClock.elapsedRealtimeNanos()
             val worker = HandlerThread("CinematicGyro").apply { start() }
             thread = worker
-            check(manager.registerListener(this, gyro, 20_000, Handler(worker.looper)))
+            check(sensorManager.registerListener(this, gyro, 20_000, Handler(worker.looper)))
             true
         } catch (error: Exception) {
             stop()

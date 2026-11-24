@@ -153,6 +153,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
     private var photo: ImageCapture? = null
     private var recording: Recording? = null
     private var cancelStart = false
+    private var recoveryRunning = false
     private var processor: ColorProcessor? = null
     private var binding = 0
     private var disposed = false
@@ -196,12 +197,14 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
     }
 
     fun recoverRecordings() {
-        if (state.value.active) return
+        if (state.value.active || recoveryRunning) return
+        recoveryRunning = true
         stateFlow.update { it.copy(recovering = true) }
         scope.launch {
             val result = withContext(Dispatchers.IO) { runCatching { clips.recoverInterrupted() } }
             val recovered = result.getOrNull() ?: 0
             val unresolved = withContext(Dispatchers.IO) { clips.pendingCount() }
+            recoveryRunning = false
             stateFlow.update { it.copy(recovering = false, pendingRecovery = unresolved,
                 clipRevision = it.clipRevision + if (recovered > 0) 1 else 0,
                 message = when {

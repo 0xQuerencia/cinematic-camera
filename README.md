@@ -38,6 +38,12 @@ Look Lab now provides five-knot master and individual red, green and blue curves
 
 Select Photo in the capture screen, then Settings → Photo format. JPEG is the default; RAW/DNG is offered only when CameraX advertises the RAW still-image format for the active camera. The photo session uses a dedicated ImageCapture use case rather than taking a screenshot of the video preview. Still photos are ungraded and saved in Pictures/Cinematic Camera, available in the system gallery. Video looks and video-only settings are disabled in photo mode. Selecting a video look switches back to video capture. Manual exposure, focus and white-balance controls use the active camera's reported capabilities. RAW output, manual exposure and photo session compatibility require device tests. Bracketing and photo grading are not yet implemented.
 
+## Production and recovery
+
+Settings → Production & motion stores project, reel, scene, take and notes in the next video manifest. The take number advances when recording starts. Optional gyroscope CSV records raw angular velocity on Android's monotonic sensor clock; it does not claim frame-level synchronization or direct Gyroflow compatibility. Export the CSV from clip details. Graded derivatives do not inherit a possibly misaligned gyro file.
+
+Before video capture the app writes an atomic journal, including the exact selected cube. On startup or Retry recovery, it examines only journaled media names and restores manifests for inspectable MP4s. Incomplete or inaccessible MP4s are not automatically deleted. This is best-effort recovery, not MP4 repair.
+
 ## Verification
 
 ```sh
