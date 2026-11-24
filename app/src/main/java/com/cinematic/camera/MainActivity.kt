@@ -23,6 +23,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        engine.disconnectRemote()
         engine.stop()
         super.onStop()
     }

@@ -74,7 +74,7 @@ private val quickLooks by lazy {
 internal enum class Drawer(val label: String) {
     OUTPUT("Output"), EXPOSURE("Exposure"), FOCUS("Focus"), WB("White balance"),
     LENS("Lens"), AUDIO("Audio"), TOOLS("Manual controls"), LOOKS("Looks & presets"),
-    MEDIA("Media library"), COLORIST("Auto Look & colorist"), PRODUCTION("Production & motion"), SETTINGS("Settings & diagnostics"), MONITOR("Monitoring")
+    MEDIA("Media library"), COLORIST("Auto Look & colorist"), PRODUCTION("Production & motion"), REMOTE("Paired camera remote"), SETTINGS("Settings & diagnostics"), MONITOR("Monitoring")
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -82,6 +82,7 @@ internal enum class Drawer(val label: String) {
 fun CameraApp(engine: CameraEngine) {
     val context = LocalContext.current
     val state by engine.state.collectAsStateWithLifecycle()
+    val remoteState by engine.remote.state.collectAsStateWithLifecycle()
     val prefs by context.preferences.data.collectAsStateWithLifecycle(initialValue = null)
     val pro = prefs?.get(proKey) ?: false
     val left = prefs?.get(leftKey) ?: false
@@ -386,6 +387,7 @@ fun CameraApp(engine: CameraEngine) {
         else -> "Auto Look · ${grade.look.name} · ${autoReason ?: "Analyzing scene…"}"
     } else null
     val notice = state.warning ?: if (state.audioIssue && state.active) "Microphone reported an error." else state.message
+    val remoteNotice = if (remoteState.role != "Off") "Bluetooth ${remoteState.role} · ${remoteState.peer}" else null
     val live = remember {
         movableContentOf<Modifier, String, Boolean, () -> Unit> { modifier, frame, available, permission ->
             Viewfinder(engine, view, modifier, frame, available, permission)
@@ -403,6 +405,9 @@ fun CameraApp(engine: CameraEngine) {
                         Box(Modifier.align(Alignment.Center).fillMaxHeight().width(1.dp).background(Paper.copy(alpha = .68f)))
                         Hint("Before", Paper, Modifier.align(Alignment.BottomStart).padding(10.dp).background(Chrome).padding(5.dp))
                         Hint("After", Paper, Modifier.align(Alignment.BottomEnd).padding(10.dp).background(Chrome).padding(5.dp))
+                    }
+                    if (remoteNotice != null && !lab) {
+                        Key("Remote · disconnect", Modifier.align(Alignment.TopStart).padding(6.dp), action = engine::disconnectRemote)
                     }
                     if (state.busy == Take.RECORDING) {
                         Text("● REC ${state.timecode}", Modifier.align(Alignment.TopCenter).padding(top = if (!pro && !landscape && !lab) 64.dp else 8.dp)
@@ -616,10 +621,12 @@ fun CameraApp(engine: CameraEngine) {
                             exportFile("generated-look.cube", buildString { cube.writeTo(this) })
                         } })
                     Drawer.PRODUCTION -> ProductionPanel(state, engine)
+                    Drawer.REMOTE -> RemotePanel(engine.remote)
                     Drawer.SETTINGS -> {
                         Key(if (state.photoMode) "Photo format" else "Recording format", Modifier.fillMaxWidth()) { drawer = Drawer.OUTPUT }
                         Key("Microphone", Modifier.fillMaxWidth()) { drawer = Drawer.AUDIO }
                         Key("Production & motion", Modifier.fillMaxWidth(), enabled = !state.active) { drawer = Drawer.PRODUCTION }
+                        Key("Paired camera remote", Modifier.fillMaxWidth(), enabled = !state.active) { drawer = Drawer.REMOTE }
                         Key("Auto Look & colorist", Modifier.fillMaxWidth(), enabled = !state.active && !state.profile.hdr, action = ::openColorist)
                         ToggleRow("Left-handed landscape", left, !state.active) {
                             scope.launch { context.preferences.edit { prefs -> prefs[leftKey] = it } }
