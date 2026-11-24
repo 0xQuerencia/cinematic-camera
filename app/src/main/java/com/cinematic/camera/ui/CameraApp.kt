@@ -52,6 +52,7 @@ import com.cinematic.camera.color.Look
 import com.cinematic.camera.color.LookStorage
 import com.cinematic.camera.color.SavedLook
 import com.cinematic.camera.color.originalLooks
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -191,6 +192,8 @@ fun CameraApp(engine: CameraEngine) {
             try {
                 val look = withContext(Dispatchers.Default) { AdaptiveColor.scene(pixels, choice) }
                 if (look != null) applyGenerated(look) else engine.tell("Could not generate a look from this scene.")
+            } catch (cancel: CancellationException) {
+                throw cancel
             } catch (failure: Exception) {
                 engine.tell("Scene LUT generation failed.")
             } finally { generating = false }
@@ -207,6 +210,8 @@ fun CameraApp(engine: CameraEngine) {
                     val look = withContext(Dispatchers.Default) { AdaptiveColor.reference(source, target) }
                     if (look != null) applyGenerated(look)
                     else engine.tell("Reference matching needs usable source and reference contrast.")
+                } catch (cancel: CancellationException) {
+                    throw cancel
                 } catch (failure: Exception) {
                     engine.tell("Could not read or match the reference image.")
                 } finally { generating = false }
@@ -274,7 +279,7 @@ fun CameraApp(engine: CameraEngine) {
         }
         val recommendation = autoPicker.consider(pixels, SystemClock.elapsedRealtime()) ?: return@LaunchedEffect
         val selected = originalLooks.firstOrNull { it.name == recommendation.name } ?: return@LaunchedEffect
-        val generated = if (adaptiveLook) AdaptiveColor.scene(pixels, recommendation) else null
+        val generated = if (adaptiveLook) withContext(Dispatchers.Default) { AdaptiveColor.scene(pixels, recommendation) } else null
         val next = generated?.let { Grade(look = it) } ?: Grade(look = selected, strength = recommendation.strength)
         if (grade != next) {
             grade = next
