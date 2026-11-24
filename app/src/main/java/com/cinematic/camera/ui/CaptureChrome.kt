@@ -77,7 +77,7 @@ internal fun SimpleCapture(
     modifier: Modifier = Modifier,
     selectMode: (Boolean) -> Unit, onSettings: () -> Unit, onGuide: () -> Unit,
     onExposure: () -> Unit, onLooks: () -> Unit, selectLook: (Look) -> Unit,
-    onLibrary: () -> Unit, onRecord: () -> Unit, onFlip: () -> Unit,
+    onLibrary: () -> Unit, onRecord: () -> Unit, onFlip: () -> Unit, onCaptureMode: (Boolean) -> Unit,
     autoLook: Boolean, autoStatus: String?, onAutoLook: () -> Unit,
     compareControl: @Composable () -> Unit,
     preview: @Composable (Modifier) -> Unit,
@@ -118,19 +118,20 @@ internal fun SimpleCapture(
                         .background(Chrome).padding(horizontal = 8.dp, vertical = 4.dp))
                 Spacer(Modifier.height(4.dp))
             }
-            Row(Modifier.fillMaxWidth().padding(bottom = 4.dp), verticalAlignment = Alignment.CenterVertically,
+            if (!state.photoMode) Row(Modifier.fillMaxWidth().padding(bottom = 4.dp), verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Key("Auto Look", selected = autoLook, enabled = !state.active, action = onAutoLook)
                 if (autoStatus != null) Hint(autoStatus, Paper,
                     Modifier.weight(1f).clip(InstrumentShape).background(Chrome).padding(6.dp))
             }
-            LookStrip(looks, look, !state.active, onLooks, selectLook)
+            if (!state.photoMode) LookStrip(looks, look, !state.active, onLooks, selectLook)
+            CaptureModeSwitch(state, onCaptureMode)
             Box(Modifier.fillMaxWidth().height(84.dp)) {
                 Box(Modifier.align(Alignment.CenterStart).padding(start = 20.dp)) {
                     IconKey(ToolIcon.LIBRARY, "Media library", enabled = !state.active, action = onLibrary)
                 }
                 Box(Modifier.align(Alignment.Center)) {
-                    RecordKey(state.busy, state.busy == Take.RECORDING || (state.busy == Take.IDLE && state.ready), onRecord)
+                    RecordKey(state.busy, state.busy == Take.RECORDING || (state.busy == Take.IDLE && state.ready), onRecord, state.photoMode)
                 }
                 Box(Modifier.align(Alignment.CenterEnd).padding(end = 20.dp)) {
                     IconKey(ToolIcon.FLIP, "Switch camera", enabled = !state.active && state.lenses.size > 1, action = onFlip)
@@ -199,5 +200,15 @@ private fun LibraryTab(label: String, icon: ToolIcon, active: Boolean, modifier:
         horizontalAlignment = Alignment.CenterHorizontally) {
         ToolGlyph(icon, tone)
         Hint(label, tone)
+    }
+}
+
+@Composable
+internal fun CaptureModeSwitch(state: CaptureState, select: (Boolean) -> Unit) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically) {
+        Key("Photo", selected = state.photoMode, enabled = !state.active) { select(true) }
+        Spacer(Modifier.width(6.dp))
+        Key("Video", selected = !state.photoMode, enabled = !state.active) { select(false) }
     }
 }
