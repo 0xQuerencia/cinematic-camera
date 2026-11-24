@@ -214,4 +214,6 @@ data class Grade(
     val vignette: Float = 0f,
     val bloom: Float = 0f,
     val halation: Float = 0f,
+    val curves: RgbCurves = RgbCurves(),
+    val skinProtection: Float = 0f,
 )
