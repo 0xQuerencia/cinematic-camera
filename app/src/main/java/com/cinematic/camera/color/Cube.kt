@@ -222,4 +222,7 @@ data class Grade(
     val halation: Float = 0f,
     val curves: RgbCurves = RgbCurves(),
     val skinProtection: Float = 0f,
+    val balance: ColorBalance = ColorBalance(),
+    val hsl: SelectiveHsl = SelectiveHsl(),
+    val diffusion: Float = 0f,
 )
