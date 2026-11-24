@@ -37,7 +37,7 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build APK and run JVM tests
+      - name: Build APK, test APK, run JVM tests and lint
         run: |
           chmod +x ./gradlew
           ./gradlew --no-daemon :app:assembleDebug :app:assembleDebugAndroidTest :app:testDebugUnitTest :app:lintDebug
@@ -48,7 +48,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: cinematic-camera-v0.2.0-alpha.1-debug
+          name: cinematic-camera-v0.3.0-alpha.1-debug
           path: |
             app/build/outputs/apk/debug/app-debug.apk
             app-debug.apk.sha256

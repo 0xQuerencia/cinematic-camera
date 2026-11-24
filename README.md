@@ -11,7 +11,7 @@ Use JDK 17 or 21, Android SDK Platform 36, and Android SDK Build Tools. Set `AND
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-The package is `com.cinematic.camera`. The minimum OS is Android 8.0, API 26. Android 8–9 asks for shared-storage access when saving. The app uses CameraX 1.5.3, Compose Material 3, Camera2 interop, OpenGL ES 3, Media3 Transformer, and DataStore. The APK runs offline.
+The package is `com.cinematic.camera`. The minimum OS is Android 8.0, API 26. Android 8–9 asks for shared-storage access when saving. The app uses CameraX 1.7.0, Compose Material 3, Camera2 interop, OpenGL ES 3, Media3 Transformer, and DataStore. The APK runs offline.
 
 ## Record and grade
 
@@ -36,13 +36,23 @@ Look Lab now provides five-knot master and individual red, green and blue curves
 
 ## Still photography (experimental)
 
-Select Photo in the capture screen, then Settings → Photo format. JPEG is the default; RAW/DNG is offered only when CameraX advertises the RAW still-image format for the active camera. The photo session uses a dedicated ImageCapture use case rather than taking a screenshot of the video preview. Still photos are ungraded and saved in Pictures/Cinematic Camera, available in the system gallery. Video looks and video-only settings are disabled in photo mode. Selecting a video look switches back to video capture. Manual exposure, focus and white-balance controls use the active camera's reported capabilities. RAW output, manual exposure and photo session compatibility require device tests. Bracketing and photo grading are not yet implemented.
+Select Photo in the capture screen, then Settings → Photo format. JPEG is the default; RAW/DNG is offered only when CameraX advertises the RAW still-image format for the active camera. The photo session uses a dedicated ImageCapture use case rather than taking a screenshot of the video preview. Still photos are ungraded and saved in Pictures/Cinematic Camera, available in the system gallery. Video looks and video-only settings are disabled in photo mode. Selecting a video look switches back to video capture. Manual exposure, focus and white-balance controls use the active camera's reported capabilities. RAW output, manual exposure and photo session compatibility require device tests. Exposure bracketing saves three distinct sensor exposures when AE compensation and convergence permit. JPEG look export produces a separate sRGB copy at up to 8 MP, leaving the original untouched; RAW remains ungraded.
 
 ## Production and recovery
 
 Settings → Production & motion stores project, reel, scene, take and notes in the next video manifest. The take number advances when recording starts. Optional gyroscope CSV records raw angular velocity on Android's monotonic sensor clock; it does not claim frame-level synchronization or direct Gyroflow compatibility. Export the CSV from clip details. Graded derivatives do not inherit a possibly misaligned gyro file.
 
 Before video capture the app writes an atomic journal, including the exact selected cube. On startup or Retry recovery, it examines only journaled media names and restores manifests for inspectable MP4s. Incomplete or inaccessible MP4s are not automatically deleted. This is best-effort recovery, not MP4 repair.
+
+## Advanced capture and grading
+
+- Exposure offers shutter-angle lock with ISO matching on application. Changing FPS reapplies the angle; there is no continuous auto ISO. Native manual sensor control and fixed FPS are required.
+- Output offers advertised H.264 SDR, H.265 SDR and HLG10 profiles; HLG is direct capture only. Saved clip inspection checks codec, color transfer, size, frame rate, frame intervals and audio metadata.
+- Settings offers Low load (direct SDR) and Balanced (clean SDR) performance profiles, adapted to advertised formats. Neither guarantees sustained frame rate.
+- Look Lab offers RGB curves, tonal color wheels, hue-band HSL adjustments, skin-tone protection and diffusion. Auto Look & colorist generates local adaptive LUTs and matches global reference-image statistics; it is not semantic scene recognition.
+- Monitoring includes scopes, preview-only zebras/peaking/false color, horizon, and saved HUD visibility. A sampled map is available when an overlay cannot be drawn directly.
+- The paired Bluetooth remote accepts foreground camera commands from an explicitly selected bonded peer. Both devices need the app. It does not stream a viewfinder.
+- Microphone settings offer target channels/bitrate and mute during recording. Android controls routing and gain. Connected-input inventory is not proof of the active audio route.
 
 ## Verification
 
