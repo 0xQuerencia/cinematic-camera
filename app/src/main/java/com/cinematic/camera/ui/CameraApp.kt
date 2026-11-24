@@ -96,12 +96,16 @@ fun CameraApp(engine: CameraEngine) {
 
     var guide by rememberSaveable { mutableStateOf("Off") }
     var instrument by rememberSaveable { mutableStateOf(ScopeMode.OFF) }
+    var zebraLevel by rememberSaveable { mutableIntStateOf(95) }
+    var edgeSensitivity by rememberSaveable { mutableIntStateOf(50) }
+    var largeScope by rememberSaveable { mutableStateOf(false) }
+    var clearPreview by rememberSaveable { mutableStateOf(false) }
     var lab by rememberSaveable { mutableStateOf(false) }
     val library = drawer == Drawer.LOOKS || drawer == Drawer.MEDIA
     BackHandler(library || lab) { if (library) drawer = null else lab = false }
     LaunchedEffect(library) { engine.pausePreview(library) }
     fun selectMode(value: Boolean) { scope.launch { context.preferences.edit { it[proKey] = value } } }
-    LaunchedEffect(instrument, lab) { engine.scopes(instrument != ScopeMode.OFF && !lab) }
+    LaunchedEffect(instrument, lab, clearPreview, library) { engine.scopes(instrument != ScopeMode.OFF && !lab && !clearPreview && !library) }
     var compare by remember { mutableStateOf(false) }
     var split by rememberSaveable { mutableStateOf(true) }
     var grade by remember { mutableStateOf(Grade()) }
@@ -315,7 +319,7 @@ fun CameraApp(engine: CameraEngine) {
         }
         val liveContent: @Composable (Modifier) -> Unit = { modifier ->
                 Box(modifier.background(Color.Black)) {
-                    live(Modifier.fillMaxSize(), guide, hasCamera) { cameraPermission.launch(Manifest.permission.CAMERA) }
+                    live(Modifier.fillMaxSize(), if (clearPreview && !lab) "Off" else guide, hasCamera) { cameraPermission.launch(Manifest.permission.CAMERA) }
                     if (lab && split && hasCamera && !state.gpuFailed) {
                         Box(Modifier.align(Alignment.Center).fillMaxHeight().width(1.dp).background(Paper.copy(alpha = .68f)))
                         Hint("Before", Paper, Modifier.align(Alignment.BottomStart).padding(10.dp).background(Chrome).padding(5.dp))
@@ -325,8 +329,8 @@ fun CameraApp(engine: CameraEngine) {
                         Text("● REC ${state.timecode}", Modifier.align(Alignment.TopCenter).padding(top = if (!pro && !landscape && !lab) 64.dp else 8.dp)
                             .background(Ink.copy(alpha = .84f), InstrumentShape).padding(8.dp), color = Record, style = Timecode)
                     }
-                    if (!lab && instrument != ScopeMode.OFF && state.pipeline != Pipeline.DIRECT) {
-                        ScopeOverlay(engine, instrument, Modifier.align(Alignment.TopEnd).padding(8.dp))
+                    if (!lab && !clearPreview && instrument != ScopeMode.OFF && state.pipeline != Pipeline.DIRECT) {
+                        ScopeOverlay(engine, instrument, Modifier.align(Alignment.TopEnd).padding(8.dp), zebraLevel, edgeSensitivity, largeScope)
                     }
                     if (!lab && (pro || landscape) && state.pipeline != Pipeline.DIRECT && hasCamera && !state.active) {
                         CompareKey(compare, Modifier.align(Alignment.BottomEnd).padding(8.dp)) { compare = it }
@@ -497,7 +501,19 @@ fun CameraApp(engine: CameraEngine) {
                     Drawer.LENS -> LensPanel(state, engine)
                     Drawer.AUDIO -> AudioPanel(state, ::setAudio)
                     Drawer.TOOLS -> QuickControls { drawer = it }
-                    Drawer.MONITOR -> MonitorPanel(guide, { guide = it }, state, instrument, { instrument = it })
+                    Drawer.MONITOR -> {
+                        MonitorPanel(guide, { guide = it }, state, instrument, { instrument = it })
+                        Section("Viewfinder layout")
+                        ToggleRow("Clear viewfinder", clearPreview) { clearPreview = it }
+                        Hint("Hides guides and sampled scopes, not the recording indicator or camera controls.")
+                        ToggleRow("Large scope", largeScope) { largeScope = it }
+                        if (instrument == ScopeMode.ZEBRA) {
+                            Precision("Clipping threshold", zebraLevel.toFloat(), 70f..100f, unit = "%") { zebraLevel = it.toInt() }
+                        }
+                        if (instrument == ScopeMode.PEAKING) {
+                            Precision("Edge sensitivity", edgeSensitivity.toFloat(), 0f..100f, unit = "%") { edgeSensitivity = it.toInt() }
+                        }
+                    }
                     Drawer.SETTINGS -> {
                         Key("Recording format", Modifier.fillMaxWidth()) { drawer = Drawer.OUTPUT }
                         Key("Microphone", Modifier.fillMaxWidth()) { drawer = Drawer.AUDIO }

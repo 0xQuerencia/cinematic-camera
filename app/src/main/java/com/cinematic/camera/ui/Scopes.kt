@@ -16,20 +16,21 @@ import com.cinematic.camera.capture.CameraEngine
 import kotlin.math.abs
 
 internal enum class ScopeMode(val label: String) {
-    OFF("Off"), HISTOGRAM("Histogram"), WAVEFORM("Waveform"), VECTORSCOPE("Vectorscope"),
+    OFF("Off"), HISTOGRAM("Histogram"), WAVEFORM("Waveform"), RGB_PARADE("RGB parade"), VECTORSCOPE("Vectorscope"),
     ZEBRA("Luma clipping map"), PEAKING("Edge map"), FALSE_COLOR("False color map"),
 }
 
 @Composable
-internal fun ScopeOverlay(engine: CameraEngine, mode: ScopeMode, modifier: Modifier) {
+internal fun ScopeOverlay(engine: CameraEngine, mode: ScopeMode, modifier: Modifier, zebraLevel: Int = 95,
+                          edgeSensitivity: Int = 50, large: Boolean = false) {
     val samples by engine.scopeSamples.collectAsStateWithLifecycle()
     val pixels = samples
-    Column(modifier.width(156.dp).background(Ink.copy(alpha = .88f), InstrumentShape).padding(8.dp)) {
+    Column(modifier.width(if (large) 216.dp else 156.dp).background(Ink.copy(alpha = .88f), InstrumentShape).padding(8.dp)) {
         Hint(mode.label, Info)
         if (pixels == null) Hint("Waiting for camera frame")
-        else if (pixels.isEmpty()) Hint("GPU readback unavailable")
+        else if (pixels.size != 64 * 36 * 4) Hint("GPU readback unavailable")
         else {
-            Hint("Source luma · 64×36 samples")
+            Hint(if (mode == ScopeMode.RGB_PARADE || mode == ScopeMode.VECTORSCOPE) "Source RGB · 64×36 samples" else "Source luma · 64×36 samples")
             val luma = remember(pixels) {
                 FloatArray(64 * 36) { i ->
                     val index = i * 4
@@ -40,7 +41,7 @@ internal fun ScopeOverlay(engine: CameraEngine, mode: ScopeMode, modifier: Modif
             val histogram = remember(luma) {
                 IntArray(32).also { bins -> luma.forEach { bins[(it * 31).toInt().coerceIn(0, 31)]++ } }
             }
-            Canvas(Modifier.fillMaxWidth().height(72.dp)) {
+            Canvas(Modifier.fillMaxWidth().height(if (large) 108.dp else 72.dp)) {
                 val w = size.width
                 val h = size.height
                 when (mode) {
@@ -55,6 +56,19 @@ internal fun ScopeOverlay(engine: CameraEngine, mode: ScopeMode, modifier: Modif
                         for (level in 0..4) drawLine(Rule, Offset(0f, level * h / 4), Offset(w, level * h / 4))
                         luma.forEachIndexed { i, level ->
                             drawCircle(Native.copy(alpha = .46f), 1.15f, Offset(i % 64 * w / 64, (1 - level) * h))
+                        }
+                    }
+                    ScopeMode.RGB_PARADE -> {
+                        val tones = listOf(Color(0xFFFF7770), Native, Color(0xFF78ACFF))
+                        for (level in 0..4) drawLine(Rule, Offset(0f, level * h / 4), Offset(w, level * h / 4))
+                        for (channel in 0..2) {
+                            val left = channel * w / 3
+                            if (channel > 0) drawLine(Rule, Offset(left, 0f), Offset(left, h))
+                            for (i in 0 until 64 * 36) {
+                                val value = (pixels[i * 4 + channel].toInt() and 255) / 255f
+                                drawCircle(tones[channel].copy(alpha = .5f), 1.0f,
+                                    Offset(left + (i % 64 + .5f) * w / (3 * 64), (1 - value) * h))
+                            }
                         }
                     }
                     ScopeMode.VECTORSCOPE -> {
@@ -72,9 +86,9 @@ internal fun ScopeOverlay(engine: CameraEngine, mode: ScopeMode, modifier: Modif
                         val x = i % 64
                         val y = i / 64
                         val color = when (mode) {
-                            ScopeMode.ZEBRA -> if (level >= .94f && (x + y) % 4 < 2) Amber else null
+                            ScopeMode.ZEBRA -> if (level >= zebraLevel.coerceIn(70, 100) / 100f && (x + y) % 4 < 2) Amber else null
                             ScopeMode.PEAKING -> if (x < 63 && y < 35 &&
-                                abs(luma[i + 1] - level) + abs(luma[i + 64] - level) > .22f) Native else null
+                                abs(luma[i + 1] - level) + abs(luma[i + 64] - level) > (.40f - .0036f * edgeSensitivity.coerceIn(0, 100))) Native else null
                             else -> when {
                                 level >= .94f -> Record
                                 level > .76f -> Amber
