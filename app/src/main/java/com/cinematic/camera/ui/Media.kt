@@ -62,6 +62,15 @@ internal fun MediaPanel(engine: CameraEngine, revision: Int, export: (String, St
                 else -> "Direct capture · clean file"
             }, Info)
             Hint(if (clip.details.optBoolean("verifiedTracks")) clip.summary else "Tracks could not be verified.")
+            if (clip.details.has("medianFrameIntervalUs")) {
+                Hint("Frame intervals: median ${clip.details.optLong("medianFrameIntervalUs")/1000f} ms · max ${clip.details.optLong("maxFrameIntervalUs")/1000f} ms · ${clip.details.optInt("longFrameIntervals")} long intervals")
+            }
+            if (clip.details.optBoolean("audioTrack")) {
+                Hint("Audio ${clip.details.optInt("audioChannels")} ch · ${clip.details.optInt("audioSampleRate")} Hz")
+                Hint("Audio − video timestamp offset: start ${clip.details.optLong("audioMinusVideoStartUs")/1000} ms · last sample ${clip.details.optLong("audioMinusVideoLastSampleUs")/1000} ms")
+                Hint("Track timestamps do not prove perceptual lip sync.")
+            }
+            if (capture?.optBoolean("audioInputChanged") == true) Hint("Audio input devices changed during this take.", Amber)
             capture?.optJSONObject("shot")?.let { shot ->
                 Section("Production")
                 Hint(listOf(shot.optString("project"), shot.optString("reel"), shot.optString("scene"),

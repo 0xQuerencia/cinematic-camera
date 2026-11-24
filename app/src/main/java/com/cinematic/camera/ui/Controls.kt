@@ -391,10 +391,30 @@ internal fun LensPanel(state: CaptureState, engine: CameraEngine) {
 }
 
 @Composable
-internal fun AudioPanel(state: CaptureState, change: (Boolean) -> Unit) {
+internal fun AudioPanel(state: CaptureState, engine: CameraEngine, change: (Boolean) -> Unit) {
     ToggleRow("Record microphone", state.audio, !state.active, change)
-    Hint("CameraX uses Android's default microphone route. The recorder reports peak amplitude during a take.")
-    Mark("Unavailable", "Manual gain and explicit input routing are outside this recording pipeline.")
+    Section("Connected input devices")
+    if (state.audioInputs.isEmpty()) Hint("No audio input devices reported.")
+    else state.audioInputs.forEach { Hint(it, Paper) }
+    Hint("Android selects the actual microphone route. A connected input is not proof that it is being recorded.")
+    if (state.audioInputChanged && state.active) Hint("Audio devices changed; review this take.", Amber)
+    Section("Audio format")
+    KeysRow {
+        listOf(0,1,2).forEach { channels ->
+            Key(when(channels) { 1 -> "Mono"; 2 -> "Stereo"; else -> "Auto" },
+                selected = state.audioChannels == channels, enabled = !state.active) { engine.audioFormat(channels = channels) }
+        }
+    }
+    KeysRow {
+        listOf(0,96,128,192,256).forEach { kbps ->
+            Key(if (kbps == 0) "Auto" else "$kbps kb/s",selected = state.audioKbps == kbps,
+                enabled = !state.active) { engine.audioFormat(kbps = kbps) }
+        }
+    }
+    Hint("Channel count and bitrate are encoder targets, not guaranteed settings.")
+    ToggleRow("Mute this take",state.audioMuted,state.audio && state.busy == com.cinematic.camera.capture.Take.RECORDING,engine::muteAudio)
+    CaptureStatus(state,null)
+    Mark("Unavailable", "CameraX does not expose independent hardware gain or explicit input selection.")
 }
 
 @Composable

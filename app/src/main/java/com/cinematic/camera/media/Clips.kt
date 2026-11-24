@@ -126,9 +126,8 @@ class Clips(private val context: Context) {
             }
             val videoTime = timeline(extractor, index)
             require(videoTime.count > 0) { "The MP4 contains no video samples." }
-            val audioTime = tracks.firstOrNull { (_, track) ->
-                track.getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true
-            }?.let { (audioIndex, _) -> timeline(extractor, audioIndex) }
+            val audio = tracks.firstOrNull { (_, track) -> track.getString(MediaFormat.KEY_MIME)?.startsWith("audio/") == true }
+            val audioTime = audio?.let { (audioIndex, _) -> timeline(extractor, audioIndex) }
             return JSONObject().apply {
                 put("videoMime", video.getString(MediaFormat.KEY_MIME))
                 put("audioTrack", audioTime?.let { it.count > 0 } == true)
@@ -139,7 +138,15 @@ class Clips(private val context: Context) {
                 audioTime?.takeIf { it.count > 0 }?.let {
                     put("firstAudioPtsUs", it.first)
                     put("lastAudioPtsUs", it.last)
+                    put("audioMinusVideoStartUs", it.first - videoTime.first)
+                    put("audioMinusVideoLastSampleUs", it.last - videoTime.last)
                 }
+                audio?.second?.let { track ->
+                    put("audioMime", track.getString(MediaFormat.KEY_MIME))
+                    if (track.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) put("audioChannels", track.getInteger(MediaFormat.KEY_CHANNEL_COUNT))
+                    if (track.containsKey(MediaFormat.KEY_SAMPLE_RATE)) put("audioSampleRate", track.getInteger(MediaFormat.KEY_SAMPLE_RATE))
+                }
+                videoTime.pacing?.let { p -> put("medianFrameIntervalUs",p.median).put("maxFrameIntervalUs",p.max).put("longFrameIntervals",p.longIntervals) }
                 if (videoTime.count > 1 && videoTime.last > videoTime.first) {
                     put("averageFps", (videoTime.count - 1) * 1_000_000.0 / (videoTime.last - videoTime.first))
                 }
@@ -155,7 +162,7 @@ class Clips(private val context: Context) {
         }
     }
 
-    private data class Timeline(val first: Long, val last: Long, val count: Int)
+    private data class Timeline(val first: Long, val last: Long, val count: Int, val pacing: FramePacing.Result?)
 
     private fun timeline(extractor: MediaExtractor, index: Int): Timeline {
         extractor.selectTrack(index)
@@ -164,14 +171,19 @@ class Clips(private val context: Context) {
             var first = Long.MAX_VALUE
             var last = Long.MIN_VALUE
             var count = 0
+            var timestamps = LongArray(1024)
             while (extractor.sampleTime >= 0) {
                 val time = extractor.sampleTime
                 first = minOf(first, time)
                 last = maxOf(last, time)
+                if (count < 360_000) {
+                    if (count == timestamps.size) timestamps = timestamps.copyOf(minOf(360_000,timestamps.size*2))
+                    timestamps[count] = time
+                }
                 count++
                 if (!extractor.advance()) break
             }
-            return Timeline(first, last, count)
+            return Timeline(first, last, count, if (count <= 360_000) FramePacing.analyze(timestamps.copyOf(count)) else null)
         } finally {
             extractor.unselectTrack(index)
         }

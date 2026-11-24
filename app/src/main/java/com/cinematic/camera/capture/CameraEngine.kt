@@ -13,6 +13,11 @@ import android.hardware.camera2.CaptureRequest
 import android.hardware.camera2.CaptureResult
 import android.hardware.camera2.TotalCaptureResult
 import android.media.MediaCodecList
+import android.media.AudioManager
+import android.media.AudioDeviceInfo
+import android.media.AudioDeviceCallback
+import android.os.Handler
+import android.os.Looper
 import android.os.Build
 import android.os.Environment
 import android.os.PowerManager
@@ -128,6 +133,8 @@ data class CaptureState(
     val controls: Controls = Controls(), val sensor: Sensor = Sensor(), val manual: Manual = Manual(),
     val zoom: Float = 1f, val clipRevision: Int = 0,
     val ev: Int = 0, val audioIssue: Boolean = false,
+    val audioChannels: Int = 0, val audioKbps: Int = 0, val audioMuted: Boolean = false,
+    val audioInputs: List<String> = emptyList(), val audioInputChanged: Boolean = false,
     val torch: Boolean = false,
     val photoMode: Boolean = false, val rawPhoto: Boolean = false,
     val bracketSpacing: Float = 0f,
@@ -204,6 +211,30 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         }
     }
     fun disconnectRemote() { remote.disconnect() }
+    private val audioManager = app.getSystemService(AudioManager::class.java)
+    private var audioDeviceIds = emptySet<Int>()
+    private val audioDevices = object : AudioDeviceCallback() {
+        override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) { refreshAudioDevices() }
+        override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) { refreshAudioDevices() }
+    }
+    private fun refreshAudioDevices() {
+        val inputs = runCatching { audioManager?.getDevices(AudioManager.GET_DEVICES_INPUTS).orEmpty() }.getOrDefault(emptyArray())
+        val ids = inputs.map { it.id }.toSet()
+        val changed = audioDeviceIds.isNotEmpty() && audioDeviceIds != ids
+        audioDeviceIds = ids
+        val names = inputs.map { when (it.type) {
+            AudioDeviceInfo.TYPE_BUILTIN_MIC -> "Built-in microphone"
+            AudioDeviceInfo.TYPE_USB_DEVICE, AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_USB_ACCESSORY -> "USB audio"
+            AudioDeviceInfo.TYPE_WIRED_HEADSET -> "Wired headset"
+            AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "Bluetooth headset"
+            else -> "Input type ${it.type}"
+        } }.distinct()
+        stateFlow.update {
+            val warn = changed && it.active && it.audio && !it.photoMode
+            it.copy(audioInputs = names, audioInputChanged = it.audioInputChanged || warn,
+                message = if (warn) "Audio devices changed during recording. Android may reroute audio; check this take." else it.message)
+        }
+    }
     private val power = app.getSystemService(PowerManager::class.java)
     private val monitor = scope.launch {
         while (true) {
@@ -222,7 +253,11 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         }
     }
 
-    init { recoverRecordings() }
+    init {
+        refreshAudioDevices()
+        runCatching { audioManager?.registerAudioDeviceCallback(audioDevices, Handler(Looper.getMainLooper())) }
+        recoverRecordings()
+    }
 
     fun updateShot(value: ShotInfo) {
         if (state.value.active) return
@@ -398,6 +433,20 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         bind()
     }
 
+    fun audioFormat(channels: Int = state.value.audioChannels, kbps: Int = state.value.audioKbps) {
+        val current = state.value
+        if (current.active || channels !in listOf(0,1,2) || kbps !in listOf(0,96,128,192,256) ||
+            (channels == current.audioChannels && kbps == current.audioKbps)) return
+        stateFlow.update { it.copy(audioChannels = channels, audioKbps = kbps, ready = false) }
+        bind()
+    }
+
+    fun muteAudio(muted: Boolean) {
+        val current = state.value
+        if (current.busy != Take.RECORDING || !current.audio || current.photoMode) return
+        runCatching { recording?.mute(muted) }.onFailure { problem("Could not mute microphone", it) }
+    }
+
     fun setAudio(enabled: Boolean) {
         if (!state.value.active) stateFlow.update { it.copy(audio = enabled) }
     }
@@ -544,6 +593,10 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
             val capture = configuration.format?.takeUnless { configuration.photoMode }?.let { format ->
                 val recorder = Recorder.Builder().setQualitySelector(QualitySelector.from(format.quality))
                     .setVideoMimeType(configuration.profile.mime)
+                    .apply {
+                        if (configuration.audioChannels > 0) setTargetAudioChannelCount(configuration.audioChannels)
+                        if (configuration.audioKbps > 0) setTargetAudioEncodingBitRate(configuration.audioKbps * 1000)
+                    }
                     .setTargetVideoEncodingBitRate(configuration.bitrate * 1_000_000).build()
                 VideoCapture.Builder(recorder).setDynamicRange(configuration.profile.range)
                     .setTargetRotation(rotation).setVideoStabilizationEnabled(configuration.stabilization)
@@ -631,6 +684,9 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
             put("requestedFps", current.fps ?: "camera automatic")
             put("targetBitrateMbps", current.bitrate)
             put("audioRequested", current.audio)
+            put("audioChannelsRequested", current.audioChannels)
+            put("audioKbpsRequested", current.audioKbps)
+            put("availableAudioInputsAtStart", JSONArray(current.audioInputs))
             put("stabilizationRequested", current.stabilization)
             put("isoAtStartRequest", current.sensor.iso)
             put("exposureNsAtStartRequest", current.sensor.shutter)
@@ -643,7 +699,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
             if (current.pipeline != Pipeline.DIRECT) put("look", selectedGrade.toJson())
         }
         stateFlow.update { it.copy(busy = Take.STARTING, duration = 0, amplitude = null,
-            message = null, audioIssue = false) }
+            message = null, audioIssue = false, audioMuted = false, audioInputChanged = false) }
         cancelStart = false
         scope.launch {
         try {
@@ -666,6 +722,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
                 stateFlow.update {
                     it.copy(duration = stats.recordedDurationNanos,
                         amplitude = stats.audioStats.audioAmplitude.takeIf { activeAudio && it.isFinite() && it >= 0 },
+                        audioMuted = stats.audioStats.audioState == AudioStats.AUDIO_STATE_MUTED,
                         audioIssue = it.audioIssue || (current.audio && stats.audioStats.hasError()))
                 }
                 when (event) {
@@ -683,6 +740,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
                         gyro.stop()?.let { metadata.put("gyro", it) }
                         metadata.put("recorderError", event.error)
                         metadata.put("audioIssue", state.value.audioIssue)
+                        metadata.put("audioInputChanged", state.value.audioInputChanged)
                         metadata.put("recordedBytes", stats.numBytesRecorded)
                         if (event.hasError()) Log.w("CinematicCamera", "Recorder finalized with ${event.error}", event.cause)
                         stateFlow.update { it.copy(busy = Take.VERIFYING, amplitude = null) }
@@ -708,6 +766,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
                                         val fps = measured.optDouble("averageFps")
                                         if (current.fps != null && (!fps.isFinite() || kotlin.math.abs(fps - current.fps) > 1.0)) add("frame rate")
                                         if (current.audio && !measured.optBoolean("audioTrack")) add("audio")
+                                        if (current.audio && current.audioChannels > 0 && measured.optInt("audioChannels") != current.audioChannels) add("audio channels")
                                     }
                                     metadata.put("formatDifferences", JSONArray(differences))
                                     clips.save(uri, title, metadata, measured)
@@ -970,6 +1029,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
     fun close() {
         disposed = true
         remote.close()
+        runCatching { audioManager?.unregisterAudioDeviceCallback(audioDevices) }
         stop()
         monitor.cancel()
         camera?.cameraInfo?.cameraState?.removeObservers(owner)
