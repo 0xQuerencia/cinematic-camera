@@ -17,13 +17,21 @@ class ColorIntegrationTest {
     @Test fun gradeAndPresetRoundTrip() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val storage = LookStorage(context)
-        val grade = Grade(look = originalLooks[6], strength = .37f, exposure = .25f, grain = .1f)
+        val grade = Grade(look = originalLooks[6], strength = .37f, exposure = .25f, grain = .1f,
+            curves = RgbCurves(red = ToneCurve(.15f, .4f, .85f)), skinProtection = .65f)
         val initial = SavedLook("round-trip", "Test grade", grade, JSONObject().put("fps", 30))
         val decoded = storage.decode(initial.id, storage.encode(initial))
         assertEquals(initial.name, decoded.name)
         assertEquals(30, decoded.capture?.getInt("fps"))
         assertEquals(.37f, decoded.grade.strength, .00001f)
         assertEquals(.25f, decoded.grade.exposure, .00001f)
+        assertEquals(grade.curves, decoded.grade.curves)
+        assertEquals(.65f, decoded.grade.skinProtection, .00001f)
+        val legacy = JSONObject(storage.encode(initial))
+        legacy.getJSONObject("grade").apply { remove("curves"); remove("skinProtection") }
+        val legacyGrade = storage.decode(initial.id, legacy.toString()).grade
+        assertEquals(RgbCurves(), legacyGrade.curves)
+        assertEquals(0f, legacyGrade.skinProtection, .00001f)
         val expected = requireNotNull(grade.look.cube).sample(.14f, .43f, .89f)
         assertArrayEquals(expected, requireNotNull(decoded.grade.look.cube).sample(.14f, .43f, .89f), .00001f)
         assertThrows(IllegalArgumentException::class.java) {
@@ -76,6 +84,19 @@ class ColorIntegrationTest {
                             val actual = (buffer[i * 4 + channel].toInt() and 255) / 255f
                             assertEquals("Pixel $i, channel $channel, strength $strength", expected, actual, .013f)
                         }
+                    }
+                }
+                val curves = RgbCurves(master = ToneCurve(.1f, .45f, .9f), red = ToneCurve(.3f, .6f, .8f))
+                shader.prepare(Grade(curves = curves), 0f, false, id[0])
+                shader.draw(matrix, enabled = true, split = false)
+                buffer.clear()
+                GL.glReadPixels(0, 0, 3, 1, GL.GL_RGBA, GL.GL_UNSIGNED_BYTE, buffer)
+                assertEquals(GL.GL_NO_ERROR, GL.glGetError())
+                for (i in 0..2) {
+                    val expected = curves.map(colors[i * 3] / 255f, colors[i * 3 + 1] / 255f, colors[i * 3 + 2] / 255f)
+                    for (channel in 0..2) {
+                        val actual = (buffer[i * 4 + channel].toInt() and 255) / 255f
+                        assertEquals("Curve pixel $i channel $channel", expected[channel], actual, .013f)
                     }
                 }
             }
