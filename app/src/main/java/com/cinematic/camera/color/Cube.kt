@@ -10,20 +10,26 @@ class Cube private constructor(
     val max: FloatArray,
     internal val samples: FloatArray,
 ) {
-    fun sample(r: Float, g: Float, b: Float): FloatArray {
-        val p = floatArrayOf(r, g, b).mapIndexed { i, v ->
-            ((v - min[i]) / (max[i] - min[i])).coerceIn(0f, 1f) * (size - 1)
-        }
-        val base = p.map { floor(it).toInt().coerceAtMost(size - 2) }
-        val t = p.mapIndexed { i, v -> v - base[i] }
-        val result = FloatArray(3)
+    fun sample(r: Float, g: Float, b: Float): FloatArray =
+        FloatArray(3).also { sampleInto(r, g, b, it) }
+
+    fun sampleInto(r: Float, g: Float, b: Float, result: FloatArray) {
+        val last = size - 1
+        val px = ((r - min[0]) / (max[0] - min[0])).coerceIn(0f, 1f) * last
+        val py = ((g - min[1]) / (max[1] - min[1])).coerceIn(0f, 1f) * last
+        val pz = ((b - min[2]) / (max[2] - min[2])).coerceIn(0f, 1f) * last
+        val bx = px.toInt().coerceAtMost(last - 1)
+        val by = py.toInt().coerceAtMost(last - 1)
+        val bz = pz.toInt().coerceAtMost(last - 1)
+        val tx = px - bx; val ty = py - by; val tz = pz - bz
+        result[0] = 0f; result[1] = 0f; result[2] = 0f
         for (z in 0..1) for (y in 0..1) for (x in 0..1) {
-            val entry = ((base[2] + z) * size * size + (base[1] + y) * size + base[0] + x) * 3
-            val weight = (if (x == 1) t[0] else 1 - t[0]) *
-                (if (y == 1) t[1] else 1 - t[1]) * (if (z == 1) t[2] else 1 - t[2])
-            for (channel in 0..2) result[channel] += samples[entry + channel] * weight
+            val entry = ((bz + z) * size * size + (by + y) * size + bx + x) * 3
+            val weight = (if (x == 1) tx else 1 - tx) * (if (y == 1) ty else 1 - ty) * (if (z == 1) tz else 1 - tz)
+            result[0] += samples[entry] * weight
+            result[1] += samples[entry + 1] * weight
+            result[2] += samples[entry + 2] * weight
         }
-        return result
     }
 
     fun writeTo(output: Appendable) {

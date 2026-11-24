@@ -19,6 +19,9 @@ import com.cinematic.camera.capture.ExposureMath
 import com.cinematic.camera.capture.CaptureState
 import com.cinematic.camera.capture.Pipeline
 import com.cinematic.camera.capture.VideoProfile
+import com.cinematic.camera.capture.Bracket
+import com.cinematic.camera.color.Grade
+import com.cinematic.camera.color.originalLooks
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONArray
@@ -103,7 +106,7 @@ internal fun Precision(label: String, value: Float, range: ClosedFloatingPointRa
 }
 
 @Composable
-internal fun OutputPanel(state: CaptureState, engine: CameraEngine) {
+internal fun OutputPanel(state: CaptureState, engine: CameraEngine, photoGrade: Grade = Grade(), changePhotoGrade: (Grade) -> Unit = {}) {
     val enabled = !state.active
     if (state.photoMode) {
         Section("Still image format")
@@ -112,7 +115,36 @@ internal fun OutputPanel(state: CaptureState, engine: CameraEngine) {
             Key("RAW / DNG", selected = state.rawPhoto, enabled = enabled && state.controls.rawPhoto) { engine.rawPhoto(true) }
         }
         Hint(if (state.controls.rawPhoto) "RAW support is advertised by this camera; saved DNG must be tested." else "This camera does not advertise RAW still capture.")
-        Hint("Photos are saved to Pictures/Cinematic Camera. Capture is ungraded.")
+        Section("Exposure bracketing")
+        val range = state.controls.ev
+        val bracketAvailable = range != null && state.manual.iso == null && !state.manual.aeLock
+        KeysRow {
+            listOf(0f, .7f, 1f, 2f).forEach { spacing ->
+                val valid = spacing == 0f || (bracketAvailable && range != null &&
+                    Bracket.indices(state.ev, state.controls.evStep, range.lower, range.upper, spacing).isNotEmpty())
+                Key(if (spacing == 0f) "Single" else "3 × ±$spacing EV",
+                    selected = state.bracketSpacing == spacing, enabled = enabled && valid) { engine.photoBracket(spacing) }
+            }
+        }
+        Hint("Three separate exposures; no automatic HDR merge. Requires auto exposure and sufficient EV range.")
+        Section("JPEG film look")
+        if (state.rawPhoto) Hint("RAW is ungraded. Choose JPEG for film-look copies.")
+        else {
+            KeysRow {
+                originalLooks.forEach { look ->
+                    Column(Modifier.width(100.dp)) {
+                        LookSwatch(look, Modifier.fillMaxWidth().height(48.dp))
+                        Key(look.name, Modifier.fillMaxWidth(), selected = photoGrade.look.name == look.name, enabled = enabled) {
+                            changePhotoGrade(Grade(look = look, strength = photoGrade.strength))
+                        }
+                    }
+                }
+            }
+            if (photoGrade.look.cube != null) Precision("Look strength", photoGrade.strength * 100f, 0f..100f,
+                enabled = enabled, unit = "%") { changePhotoGrade(photoGrade.copy(strength = it / 100f)) }
+            Hint("Saves the original JPEG and a separate LUT-only sRGB copy (up to 8 MP for bounded memory). Live preview remains ungraded.")
+        }
+        Hint("Photos are saved to Pictures/Cinematic Camera.")
         return
     }
     Section("Codec & dynamic range")

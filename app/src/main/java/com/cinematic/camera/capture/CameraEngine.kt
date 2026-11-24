@@ -56,6 +56,11 @@ import com.cinematic.camera.color.ColorProcessor
 import com.cinematic.camera.color.Grade
 import com.cinematic.camera.color.toJson
 import com.cinematic.camera.media.Clips
+import com.cinematic.camera.media.PhotoGrade
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -94,6 +99,7 @@ data class Sensor(
     val awb: Int? = null, val aeLocked: Boolean = false, val af: Int? = null,
     val ev: Int? = null, val eis: Boolean? = null, val awbLocked: Boolean = false,
     val antibanding: Int? = null,
+    val aeState: Int? = null,
 )
 data class Controls(
     val iso: Range<Int>? = null, val shutter: Range<Long>? = null,
@@ -124,6 +130,7 @@ data class CaptureState(
     val ev: Int = 0, val audioIssue: Boolean = false,
     val torch: Boolean = false,
     val photoMode: Boolean = false, val rawPhoto: Boolean = false,
+    val bracketSpacing: Float = 0f,
     val shot: ShotInfo = ShotInfo(), val gyroAvailable: Boolean = false, val gyroEnabled: Boolean = false,
     val recovering: Boolean = false, val pendingRecovery: Int = 0,
 ) {
@@ -162,6 +169,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
     private var photo: ImageCapture? = null
     private var recording: Recording? = null
     private var cancelStart = false
+    private var cancelPhoto = false
     private var recoveryRunning = false
     private var processor: ColorProcessor? = null
     private var binding = 0
@@ -318,6 +326,12 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         bind()
     }
 
+    fun photoBracket(spacing: Float) {
+        val current = state.value
+        if (!current.photoMode || current.active || spacing !in listOf(0f, .7f, 1f, 2f)) return
+        stateFlow.update { it.copy(bracketSpacing = spacing) }
+    }
+
     fun rawPhoto(enabled: Boolean) {
         val current = state.value
         if (!current.photoMode || current.active || (enabled && !current.controls.rawPhoto) ||
@@ -468,7 +482,8 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
                         result.get(CaptureResult.CONTROL_AE_EXPOSURE_COMPENSATION),
                         result.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE)?.let { it != 0 },
                         result.get(CaptureResult.CONTROL_AWB_LOCK) == true,
-                        result.get(CaptureResult.CONTROL_AE_ANTIBANDING_MODE))
+                        result.get(CaptureResult.CONTROL_AE_ANTIBANDING_MODE),
+                        result.get(CaptureResult.CONTROL_AE_STATE))
                     main.execute {
                         if (!disposed && binding == generation &&
                             owner.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)) {
@@ -546,7 +561,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
     fun start(selectedGrade: Grade) {
         val current = state.value
         if (current.recovering) { tell("Checking interrupted recordings."); return }
-        if (current.photoMode) { capturePhoto(); return }
+        if (current.photoMode) { capturePhoto(selectedGrade); return }
         val capture = video ?: return
         if (!current.ready || current.active) return
         if (current.bytes < stopBytes || current.thermal >= 4) {
@@ -687,48 +702,105 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
         }
     }
 
-    private fun capturePhoto() {
+    private fun capturePhoto(selectedGrade: Grade) {
         val current = state.value
         val capture = photo ?: return
+        val bound = camera ?: return
         if (current.active || !current.ready) return
-        if (current.bytes < stopBytes || current.thermal >= 4) {
-            tell("Photo capture is blocked by storage or temperature.")
-            return
-        }
+        if (current.bytes < stopBytes || current.thermal >= 4) { tell("Photo capture is blocked by storage or temperature."); return }
         if (Build.VERSION.SDK_INT < 29 && !permission(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
-            tell("Storage permission is required to save a photo.")
-            return
+            tell("Storage permission is required to save a photo."); return
         }
+        val range = current.controls.ev
+        val bracket = current.bracketSpacing > 0f
+        val indices = if (!bracket) listOf(current.ev) else if (range != null &&
+            current.manual.iso == null && !current.manual.aeLock) {
+            Bracket.indices(current.ev, current.controls.evStep, range.lower, range.upper, current.bracketSpacing)
+        } else emptyList()
+        if (indices.isEmpty()) { tell("Bracketing requires auto exposure and enough EV range on both sides."); return }
         val raw = current.rawPhoto
         val extension = if (raw) "dng" else "jpg"
         val mime = if (raw) "image/x-adobe-dng" else "image/jpeg"
-        val title = "PHOTO_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}.$extension"
-        val values = ContentValues().apply {
-            put(MediaStore.Images.Media.DISPLAY_NAME, title)
-            put(MediaStore.Images.Media.MIME_TYPE, mime)
-            if (Build.VERSION.SDK_INT >= 29) put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Cinematic Camera")
-        }
-        val options = ImageCapture.OutputFileOptions.Builder(app.contentResolver,
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values).build()
+        val batch = "PHOTO_${System.currentTimeMillis()}_${UUID.randomUUID().toString().take(6)}"
+        cancelPhoto = false
         stateFlow.update { it.copy(busy = Take.STARTING, message = null) }
-        try {
-            capture.takePicture(options, main, object : ImageCapture.OnImageSavedCallback {
-                override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-                    stateFlow.update { it.copy(busy = Take.IDLE, message =
-                        if (output.savedUri != null) "Photo saved · $title" else "Camera did not return a saved photo URI.") }
+        scope.launch {
+            val saved = mutableListOf<Pair<String, android.net.Uri>>()
+            var copies = 0
+            var failure: String? = null
+            suspend fun exposure(index: Int) {
+                withTimeout(2500L) {
+                    suspendCancellableCoroutine<Unit> { continuation ->
+                        val future = bound.cameraControl.setExposureCompensationIndex(index)
+                        future.addListener({
+                            if (continuation.isActive) runCatching { future.get() }
+                                .onSuccess { continuation.resume(Unit) }.onFailure { continuation.resumeWithException(it) }
+                        }, main)
+                    }
+                    while (state.value.sensor.ev != index || state.value.sensor.aeState !in
+                        listOf(CaptureResult.CONTROL_AE_STATE_CONVERGED, CaptureResult.CONTROL_AE_STATE_FLASH_REQUIRED)) {
+                        if (disposed || camera !== bound) error("Camera session changed.")
+                        delay(100)
+                    }
                 }
-                override fun onError(exception: ImageCaptureException) {
-                    stateFlow.update { it.copy(busy = Take.IDLE) }
-                    problem("Photo capture failed", exception)
+                stateFlow.update { it.copy(ev = index) }
+            }
+            try {
+                for ((number, index) in indices.withIndex()) {
+                    if (cancelPhoto || disposed || camera !== bound || state.value.thermal >= 4 || state.value.bytes < stopBytes) {
+                        failure = "Capture interrupted."; break
+                    }
+                    if (bracket) exposure(index)
+                    if (cancelPhoto || disposed) { failure = "Capture interrupted."; break }
+                    val title = "${batch}_${number + 1}.$extension"
+                    val options = ImageCapture.OutputFileOptions.Builder(app.contentResolver,
+                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI, ContentValues().apply {
+                            put(MediaStore.Images.Media.DISPLAY_NAME, title)
+                            put(MediaStore.Images.Media.MIME_TYPE, mime)
+                            if (Build.VERSION.SDK_INT >= 29) put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/Cinematic Camera")
+                        }).build()
+                    val uri = withTimeout(30_000L) {
+                        suspendCancellableCoroutine<android.net.Uri> { continuation ->
+                            capture.takePicture(options, main, object : ImageCapture.OnImageSavedCallback {
+                                override fun onImageSaved(output: ImageCapture.OutputFileResults) {
+                                    if (!continuation.isActive) return
+                                    val uri = output.savedUri
+                                    if (uri != null) continuation.resume(uri)
+                                    else continuation.resumeWithException(IllegalStateException("No photo URI."))
+                                }
+                                override fun onError(exception: ImageCaptureException) {
+                                    if (continuation.isActive) continuation.resumeWithException(exception)
+                                }
+                            })
+                        }
+                    }
+                    saved += title to uri
                 }
-            })
-        } catch (error: Exception) {
-            stateFlow.update { it.copy(busy = Take.IDLE) }
-            problem("Photo capture could not start", error)
+            } catch (error: Exception) {
+                Log.w("CinematicCamera", "Still capture failed", error)
+                failure = "Capture interrupted or exposure could not be confirmed."
+            } finally {
+                if (bracket && !disposed && camera === bound) {
+                    runCatching { exposure(current.ev) }.onFailure {
+                        failure = "Could not confirm original EV restored; check exposure."
+                    }
+                }
+            }
+            if (!raw && selectedGrade.look.cube != null && selectedGrade.strength > 0f && saved.isNotEmpty()) {
+                stateFlow.update { it.copy(busy = Take.VERIFYING, message = "Rendering separate JPEG look copies…") }
+                for ((title, uri) in saved) {
+                    if (cancelPhoto || disposed || state.value.thermal >= 4) break
+                    runCatching { withContext(Dispatchers.IO) { PhotoGrade.export(app, uri, title, selectedGrade) } }
+                        .onSuccess { copies++ }.onFailure { failure = "Original JPEG retained; a look copy failed." }
+                }
+            }
+            val message = "${saved.size} original photo(s) saved" + if (copies > 0) " · $copies graded copy/copies" else ""
+            stateFlow.update { it.copy(busy = Take.IDLE, message = listOfNotNull(message, failure).joinToString(". ")) }
         }
     }
 
     fun stop() {
+        if (state.value.photoMode && state.value.active) cancelPhoto = true
         val running = recording ?: run {
             if (state.value.busy == Take.STARTING && !state.value.photoMode) cancelStart = true
             return
@@ -739,6 +811,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
     }
 
     fun focus(x: Float, y: Float, lock: Boolean) {
+        if (state.value.photoMode && state.value.active) return
         val view = view ?: return
         val camera = camera ?: return
         if (state.value.manual.focus != null) {
@@ -780,6 +853,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
     }
 
     fun ev(value: Int) {
+        if (state.value.photoMode && state.value.active) return
         val camera = camera ?: return
         val control = state.value.controls.ev ?: return
         if (state.value.manual.iso != null || state.value.manual.aeLock) return
@@ -807,6 +881,7 @@ class CameraEngine(context: Context, private val owner: LifecycleOwner) {
     }
 
     fun manual(value: Manual) {
+        if (state.value.photoMode && state.value.active) return
         val camera = camera ?: return
         val current = state.value
         val capabilities = current.controls
