@@ -30,6 +30,41 @@ class Clips(private val context: Context) {
     private val journal = File(context.filesDir, "recording-journal").apply { mkdirs() }
     private val gyro = File(context.filesDir, "gyro").apply { mkdirs() }
 
+    private val compatibility = AtomicFile(File(context.filesDir, "compatibility-v1.json"))
+
+    @Synchronized fun compatibilityHistory(): org.json.JSONArray = runCatching {
+        org.json.JSONArray(compatibility.readFully().decodeToString())
+    }.getOrElse { org.json.JSONArray() }
+
+    /** Store only technical observations, independent of the lifetime of the source clip. */
+    @Synchronized fun observeCapture(capture: JSONObject, measured: JSONObject?) {
+        val observation = JSONObject().apply {
+            for (key in listOf("cameraId", "pipeline", "requestedResolution", "requestedFps",
+                "targetBitrateMbps", "dynamicRangeRequested", "videoMimeRequested",
+                "audioRequested", "audioChannelsRequested", "stabilizationRequested", "recorderError",
+                "formatDifferences", "audioIssue")) {
+                if (capture.has(key)) put(key, capture.get(key))
+            }
+            put("observedAtEpochMs", System.currentTimeMillis())
+            put("androidApi", Build.VERSION.SDK_INT)
+            put("osBuild", Build.DISPLAY)
+            put("inspection", if (measured != null) "measured" else "not inspected")
+            if (measured != null) for (key in listOf("width","height","averageFps","videoMime",
+                "color-transfer","profile","audioTrack","audioChannels","medianFrameIntervalUs",
+                "maxFrameIntervalUs","longFrameIntervals")) {
+                if (measured.has(key)) put(key, measured.get(key))
+            }
+            val matched = measured != null && capture.optInt("recorderError", -1) == 0 &&
+                capture.optJSONArray("formatDifferences")?.length() == 0 && !capture.optBoolean("audioIssue")
+            put("result", if (matched) "requested checks matched" else "not verified")
+        }
+        val previous = compatibilityHistory()
+        val next = org.json.JSONArray()
+        for (i in maxOf(0, previous.length() - 199) until previous.length()) next.put(previous.get(i))
+        next.put(observation)
+        write(compatibility, next.toString().encodeToByteArray())
+    }
+
     fun beginJournal(title: String, capture: JSONObject) {
         require(title.matches(Regex("CAM_[0-9]+_[a-f0-9]{6}")))
         write(AtomicFile(File(journal, "$title.json")), capture.toString().encodeToByteArray())

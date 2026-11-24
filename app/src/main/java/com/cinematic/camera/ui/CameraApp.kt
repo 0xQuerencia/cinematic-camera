@@ -583,7 +583,13 @@ fun CameraApp(engine: CameraEngine) {
         }
     }
 
-    val deviceReport = { diagnostics(state) }
+    var compatibilityHistory by remember { mutableStateOf(org.json.JSONArray()) }
+    LaunchedEffect(drawer, state.clipRevision) {
+        if (drawer == Drawer.SETTINGS) compatibilityHistory = withContext(Dispatchers.IO) {
+            engine.clips.compatibilityHistory()
+        }
+    }
+    val deviceReport = { diagnostics(state).put("recordingObservations", compatibilityHistory) }
     drawer?.takeUnless { library }?.let { panel ->
         ModalBottomSheet(onDismissRequest = { drawer = null }, containerColor = Raised,
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
@@ -678,7 +684,8 @@ fun CameraApp(engine: CameraEngine) {
                         Hint("Lite skips preview bloom and halation. Baked capture uses the full selected grade.")
                         Hint("Auto Look analyzes local color and light to pick a look before recording. A look stays fixed during each take.")
                         Key("Export device report") { exportFile("cinematic-device.json", deviceReport().toString(2)) }
-                        Text(deviceReport().toString(2), style = Timecode, color = Secondary)
+                        Hint("${compatibilityHistory.length()} local recording observations. Export includes technical measurements, not clips or shot notes.")
+                         Text(diagnostics(state).toString(2), style = Timecode, color = Secondary)
                     }
                     Drawer.LOOKS, Drawer.MEDIA -> Unit
                 }

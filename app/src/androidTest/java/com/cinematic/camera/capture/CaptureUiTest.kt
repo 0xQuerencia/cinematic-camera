@@ -12,6 +12,10 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class CaptureUiTest {
     @Test fun recordsWithMicrophoneAndPublishesAnInspectableMp4() {
+        repeat(3) { recordOne() }
+    }
+
+    private fun recordOne() {
         val test = InstrumentationRegistry.getInstrumentation()
         val context = test.targetContext
         val app = context.packageName
